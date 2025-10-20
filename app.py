@@ -508,25 +508,7 @@ def run_step_4_split_files(
 
 # --- GIAO DIỆN STREAMLIT CHÍNH ---
 
-# Hàm để đặt ảnh nền từ URL
-def set_bg_from_url(url):
-    st.markdown(
-         f"""
-         <style>
-         .stApp {{
-             background-image: url("{url}");
-             background-attachment: fixed;
-             background-size: cover
-         }}
-         </style>
-         """,
-         unsafe_allow_html=True
-     )
-
 st.set_page_config(page_title="Công cụ Dữ liệu Đất đai", layout="wide", page_icon="https://i.imgur.com/v12A61a.png")
-
-# Đặt ảnh nền cho ứng dụng - bạn có thể thay đổi URL này
-set_bg_from_url("https://images.unsplash.com/photo-1521737604893-d14cc237f11d?q=80&w=2070&auto=format&fit=crop")
 
 # --- SIDEBAR ---
 with st.sidebar:
