@@ -521,9 +521,12 @@ with st.sidebar:
 # --- MAIN PAGE ---
 col1, col2 = st.columns([1, 10])
 with col1:
-    
+    # Left column intentionally left mostly empty; keep a placeholder to satisfy Python's syntax
+    st.empty()
+
 with col2:
-    
+    # Right column intentionally left empty as layout spacer; placeholder avoids IndentationError
+    st.empty()
 
 st.markdown("---")
 
