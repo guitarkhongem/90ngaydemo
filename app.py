@@ -508,11 +508,11 @@ def run_step_4_split_files(
 
 # --- GIAO DIỆN STREAMLIT CHÍNH ---
 
-st.set_page_config(page_title="Công cụ Dữ liệu Đất đai", layout="wide", page_icon="https://i.imgur.com/v12A61a.png")
+st.set_page_config(page_title="Công cụ Dữ liệu Đất đai", layout="wide", page_icon="logo.png")
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.image("https://i.imgur.com/v12A61a.png", width=150)
+    st.image("logo.png", width=150)
     st.title("Hướng dẫn sử dụng")
     st.info("**Công cụ 1: Sao chép & Ánh xạ Cột**\n\n- Tải lên file Nguồn và file Đích.\n- Chọn sheet tương ứng.\n- Công cụ sẽ sao chép dữ liệu từ nguồn sang đích theo cấu hình định sẵn.")
     st.info("**Công cụ 2: Làm sạch & Tách file**\n\n- Tải file Excel gốc, chọn sheet.\n- Công cụ sẽ tự động chạy toàn bộ quy trình làm sạch, phân loại và tách file.\n- Kết quả trả về gồm file tổng đã xử lý và gói ZIP các file con.")
@@ -521,7 +521,7 @@ with st.sidebar:
 # --- MAIN PAGE ---
 col1, col2 = st.columns([1, 10])
 with col1:
-    st.image("https://i.imgur.com/v12A61a.png", width=70)
+    st.image("logo.png", width=70)
 with col2:
     st.title("Tổng hợp Công cụ Hỗ trợ Xử lý Dữ liệu Đất đai")
 
@@ -543,7 +543,7 @@ with tab1:
             source_sheets = get_sheet_names_from_buffer(source_file)
             selected_source_sheet = st.selectbox("2. Chọn Sheet Nguồn:", source_sheets, key="tool1_source_sheet")
         st.caption("Ví dụ về file nguồn (dữ liệu thô):")
-        st.image("https://i.imgur.com/sZ4aG2Y.png", use_column_width=True)
+        st.image("filenguon.png", use_container_width=True)
     
     with col2:
         dest_file = st.file_uploader("3. Tải lên File Đích (nhận dữ liệu)", type=["xlsx", "xls"], key="tool1_dest")
@@ -551,7 +551,7 @@ with tab1:
             dest_sheets = get_sheet_names_from_buffer(dest_file)
             selected_dest_sheet = st.selectbox("4. Chọn Sheet Đích:", dest_sheets, key="tool1_dest_sheet")
         st.caption("Ví dụ về file đích (biểu mẫu có sẵn định dạng):")
-        st.image("https://i.imgur.com/vH9722z.png", use_column_width=True)
+        st.image("filedich.png", use_container_width=True)
 
     st.markdown("---")
     
