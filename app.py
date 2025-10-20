@@ -512,7 +512,7 @@ st.set_page_config(page_title="Công cụ Dữ liệu Đất đai", layout="wide
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.image("https://i.imgur.com/v12A61a.png", width=150)
+
     st.title("Hướng dẫn sử dụng")
     st.info("**Công cụ 1: Sao chép & Ánh xạ Cột**\n\n- Tải lên file Nguồn và file Đích.\n- Chọn sheet tương ứng.\n- Công cụ sẽ sao chép dữ liệu từ nguồn sang đích theo cấu hình định sẵn.")
     st.info("**Công cụ 2: Làm sạch & Tách file**\n\n- Tải file Excel gốc, chọn sheet.\n- Công cụ sẽ tự động chạy toàn bộ quy trình làm sạch, phân loại và tách file.\n- Kết quả trả về gồm file tổng đã xử lý và gói ZIP các file con.")
@@ -521,7 +521,7 @@ with st.sidebar:
 # --- MAIN PAGE ---
 col1, col2 = st.columns([1, 10])
 with col1:
-    st.image("https://i.imgur.com/v12A61a.png", width=70)
+
 with col2:
     st.title("Tổng hợp Công cụ Hỗ trợ Xử lý Dữ liệu Đất đai")
 
@@ -543,7 +543,7 @@ with tab1:
             source_sheets = get_sheet_names_from_buffer(source_file)
             selected_source_sheet = st.selectbox("2. Chọn Sheet Nguồn:", source_sheets, key="tool1_source_sheet")
         st.caption("Ví dụ về file nguồn (dữ liệu thô):")
-        st.image("https://i.imgur.com/sZ4aG2Y.png", use_container_width=True)
+
     
     with col2:
         dest_file = st.file_uploader("3. Tải lên File Đích (nhận dữ liệu)", type=["xlsx", "xls"], key="tool1_dest")
@@ -551,7 +551,7 @@ with tab1:
             dest_sheets = get_sheet_names_from_buffer(dest_file)
             selected_dest_sheet = st.selectbox("4. Chọn Sheet Đích:", dest_sheets, key="tool1_dest_sheet")
         st.caption("Ví dụ về file đích (biểu mẫu có sẵn định dạng):")
-        st.image("https://i.imgur.com/vH9722z.png", use_container_width=True)
+
 
     st.markdown("---")
     
@@ -591,62 +591,63 @@ with tab2:
                 progress_bar_2 = st.progress(0, text="Bắt đầu...")
                 status_text_2 = st.empty()
                 
-                # BƯỚC 1, 2, 3: LÀM SẠCH VÀ PHÂN LOẠI
+                # --- CHẠY QUY TRÌNH ---
                 status_text_2.info("Đang tải file vào bộ nhớ...")
-                main_wb_2 = load_workbook(uploaded_file_2)
+                main_wb = load_workbook(uploaded_file_2)
                 
-                main_wb_2 = run_step_1_process(main_wb_2, selected_sheet_2, progress_bar_2, status_text_2, 0, 25)
-                if main_wb_2:
-                    main_wb_2 = run_step_2_clear_fill(main_wb_2, progress_bar_2, status_text_2, 25, 10)
-                if main_wb_2:
-                    main_wb_2 = run_step_3_split_by_color(main_wb_2, progress_bar_2, status_text_2, 35, 15)
+                # Bước 1
+                main_wb = run_step_1_process(main_wb, selected_sheet_2, progress_bar_2, status_text_2, 0, 25)
+                if main_wb is None: raise Exception("Bước 1 thất bại.")
+                
+                # Bước 2
+                main_wb = run_step_2_clear_fill(main_wb, progress_bar_2, status_text_2, 25, 25)
+                if main_wb is None: raise Exception("Bước 2 thất bại.")
+                
+                # Bước 3
+                main_wb = run_step_3_split_by_color(main_wb, progress_bar_2, status_text_2, 50, 25)
+                if main_wb is None: raise Exception("Bước 3 thất bại.")
+                
+                # Chuẩn bị buffer cho Bước 4 và file tổng
+                status_text_2.info("Đang chuẩn bị file kết quả...")
+                final_wb_buffer = io.BytesIO()
+                main_wb.save(final_wb_buffer)
+                final_wb_buffer.seek(0)
+                
+                # Cần 2 buffer:
+                # 1. Buffer để Bước 4 đọc dữ liệu ('Nhóm 2_GDC')
+                step4_read_buffer = io.BytesIO(final_wb_buffer.read())
+                # 2. Buffer file chính để Bước 4 lưu vào ZIP (phải seek(0) lại)
+                final_wb_buffer.seek(0) 
+                
+                main_processed_filename = f"[Processed]_{uploaded_file_2.name}"
+                
+                # Gọi hàm Bước 4 phiên bản ONLINE
+                zip_buffer = run_step_4_split_files(
+                    step4_read_buffer,       # Buffer cho Bước 4 đọc
+                    final_wb_buffer,         # Buffer file chính để lưu
+                    main_processed_filename, # Tên file chính
+                    progress_bar_2, 
+                    status_text_2, 
+                    75, 
+                    25
+                )
+                if zip_buffer is None: raise Exception("Bước 4 thất bại.")
 
-                # BƯỚC 4: TÁCH FILE
-                zip_buffer = None
-                if main_wb_2:
-                    processed_buffer = io.BytesIO()
-                    main_wb_2.save(processed_buffer)
-                    
-                    # Cần 2 buffer cho bước 4
-                    step4_read_buffer = io.BytesIO(processed_buffer.getvalue())
-                    main_processed_buffer = io.BytesIO(processed_buffer.getvalue())
-                    
-                    main_processed_filename = f"[Processed]_{uploaded_file_2.name}"
-
-                    zip_buffer = run_step_4_split_files(
-                        step4_read_buffer,
-                        main_processed_buffer,
-                        main_processed_filename,
-                        progress_bar_2, 
-                        status_text_2, 
-                        50, 
-                        50
-                    )
-
-                # HIỂN THỊ KẾT QUẢ
-                if main_wb_2 and zip_buffer:
-                    status_text_2.success("✅ HOÀN TẤT TOÀN BỘ QUY TRÌNH!")
-                    
-                    processed_buffer.seek(0)
-                    
-                    dl_col1, dl_col2 = st.columns(2)
-                    with dl_col1:
-                        st.download_button(
-                            label="📥 Tải về File Tổng đã xử lý", 
-                            data=processed_buffer, 
-                            file_name=f"[Processed]_{uploaded_file_2.name}", 
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                    with dl_col2:
-                         st.download_button(
-                             label="🗂️ Tải về Gói file con (.zip)", 
-                             data=zip_buffer, 
-                             file_name="Cac_file_con_theo_thon.zip", 
-                             mime="application/zip"
-                        )
-                else:
-                    status_text_2.error("❌ Quy trình thất bại. Vui lòng kiểm tra lại file đầu vào hoặc định dạng file.")
+                main_wb.close()
+                
+                status_text_2.success("✅ HOÀN TẤT!")
+                progress_bar_2.progress(100)
+                
+                # Hiển thị 1 nút tải ZIP duy nhất
+                st.download_button(
+                    label="🗂️ Tải về Gói Kết Quả (ZIP)",
+                    data=zip_buffer,
+                    file_name="KetQua_Thon.zip",
+                    mime="application/zip",
+                    help=f"File ZIP này chứa file Excel chính ({main_processed_filename}) VÀ tất cả các file con được tách ra từ 'Nhóm 2_GDC'."
+                )
 
         except Exception as e:
             st.error(f"Lỗi không xác định: {e}")
+            logging.error(f"Lỗi Streamlit Workflow: {e}")
 
