@@ -508,7 +508,7 @@ def run_step_4_split_files(
 
 # --- GIAO DIỆN STREAMLIT CHÍNH ---
 
-st.set_page_config(page_title="Công cụ Dữ liệu Đất đai", layout="wide", page_icon="https://i.imgur.com/v12A61a.png")
+st.set_page_config(page_title="Công cụ Dữ liệu Đất đai", layout="wide")
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -521,6 +521,8 @@ with st.sidebar:
 # --- MAIN PAGE ---
 col1, col2 = st.columns([1, 10])
 with col1:
+    # Left column intentionally left blank (spacer); placeholder to satisfy Python's syntax
+    st.empty()
 
 with col2:
     st.title("Tổng hợp Công cụ Hỗ trợ Xử lý Dữ liệu Đất đai")
