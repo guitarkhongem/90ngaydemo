@@ -2,8 +2,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from openpyxl import load_workbook, Workbook
-from openpyxl.styles import PatternFill, Border, Side
+from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter, column_index_from_string
+from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.utils.dataframe import dataframe_to_rows
 import os
 import re
@@ -14,29 +15,23 @@ import zipfile
 import tempfile
 
 # --- CẤU HÌNH LOGGING ---
-logging.basicConfig(level=logging.INFO,
+logging.basicConfig(filename='full_workflow_streamlit.log', level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- CẤU HÌNH CÔNG CỤ 1: SAO CHÉP & ÁNH XẠ ---
-TOOL1_COLUMN_MAPPING = {
-    'A': 'T', 'B': 'U', 'C': 'Y', 'D': 'C', 'E': 'H',
-    'F': 'I', 'G': 'X', 'I': 'K', 'N': 'AY'
-}
-TOOL1_START_ROW_DESTINATION = 7
-
-# --- CẤU HÌNH CÔNG CỤ 2 & 3: LÀM SẠCH & TÁCH FILE ---
+# --- CẤU HÌNH CHUNG ---
 STEP1_CHECK_COLS = ["D", "E", "F", "I", "J", "L", "M", "R", "S", "T", "U"]
 STEP1_START_ROW = 5
 STEP1_YELLOW_FILL = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
 STEP1_EMPTY_FILL = PatternFill(fill_type=None)
+
 STEP2_TARGET_COL = "G"
 STEP2_START_ROW = 5
 STEP2_EMPTY_FILL = PatternFill(fill_type=None)
 
-
-# --- CÁC HÀM HELPER CHUNG ---
+# --- CÁC HÀM HELPER (ĐÃ SỬA ĐỔI) ---
 
 def helper_copy_cell_format(src_cell, tgt_cell):
+    """(Helper) Sao chép định dạng từ cell nguồn sang cell đích"""
     if src_cell.has_style:
         tgt_cell.font = copy(src_cell.font)
         tgt_cell.border = copy(src_cell.border)
@@ -45,452 +40,555 @@ def helper_copy_cell_format(src_cell, tgt_cell):
         tgt_cell.protection = copy(src_cell.protection)
         tgt_cell.alignment = copy(src_cell.alignment)
 
+def helper_copy_rows_with_style(src_ws, tgt_ws, max_row=3):
+    """(Helper) Copy N hàng đầu tiên (giá trị + định dạng + merge + độ rộng cột)"""
+    for row_idx in range(1, max_row + 1):
+        for col_idx, src_cell in enumerate(src_ws[row_idx], start=1):
+            tgt_cell = tgt_ws.cell(row=row_idx, column=col_idx, value=src_cell.value)
+            helper_copy_cell_format(src_cell, tgt_cell)
+
+    for col_letter, dim in src_ws.column_dimensions.items():
+        if dim.width:
+            tgt_ws.column_dimensions[col_letter].width = dim.width
+
+    for merged_range in src_ws.merged_cells.ranges:
+        if merged_range.min_row <= max_row:
+            tgt_ws.merge_cells(str(merged_range))
+
 def helper_normalize_value(val):
+    """(Helper) Chuẩn hóa giá trị: chuyển về str, loại bỏ khoảng trắng thừa, xử lý NaN"""
     if pd.isna(val) or val is None:
         return np.nan
     str_val = str(val).strip()
     str_val = re.sub(r'\s+', ' ', str_val)
     return str_val.lower() if str_val else np.nan
 
+def helper_group_columns_openpyxl(ws):
+    """(Helper) Group các cột bằng openpyxl (An toàn cho online)"""
+    try:
+        # Xóa group cũ (nếu có)
+        for col in ws.column_dimensions:
+            dim = ws.column_dimensions[col]
+            if dim.outline_level > 0:
+                dim.outline_level = 0
+                dim.collapsed = False
+        
+        ranges_to_group = [("B", "C"), ("G", "H"), ("K", "K"), ("N", "Q"), ("W", "AY")]
+        
+        for start_col, end_col in ranges_to_group:
+            start_idx = column_index_from_string(start_col)
+            end_idx = column_index_from_string(end_col)
+            
+            # Đặt mức outline cho tất cả các cột trong range
+            for c_idx in range(start_idx, end_idx + 1):
+                col_letter = get_column_letter(c_idx)
+                if col_letter in ws.column_dimensions:
+                        ws.column_dimensions[col_letter].outline_level = 1
+        
+        logging.info("✅ Group cột thành công bằng openpyxl")
+
+    except Exception as e:
+        logging.warning(f"⚠️ Không thể group cột bằng openpyxl: {e}")
+
 def helper_calculate_column_width(ws):
+    """(Helper) Tính độ rộng cột thủ công cho openpyxl"""
     for col in range(1, ws.max_column + 1):
         max_length = 0
         column_letter = get_column_letter(col)
         for cell in ws[column_letter]:
             try:
                 if cell.value:
-                    max_length = max(max_length, len(str(cell.value)))
+                    cell_len = len(str(cell.value))
+                    max_length = max(max_length, cell_len)
             except:
                 pass
+        # Đặt độ rộng tối thiểu là 8, tối đa là 60
         adjusted_width = min(max(max_length + 2, 8), 60)
         ws.column_dimensions[column_letter].width = adjusted_width
 
+def helper_get_safe_filepath(output_folder, name):
+    """(Helper) Tạo tên tệp an toàn, tránh ghi đè"""
+    counter = 1
+    safe_path = os.path.join(output_folder, f"{name}.xlsx")
+    while os.path.exists(safe_path):
+        safe_path = os.path.join(output_folder, f"{name}_{counter}.xlsx")
+        counter += 1
+    return safe_path
+
 def helper_cell_has_bg(c):
+    """(Helper) Kiểm tra cell có màu nền hay không"""
     try:
-        if c.fill and c.fill.fgColor and c.fill.fgColor.rgb:
-            rgb_val = str(c.fill.fgColor.rgb).upper()
-            return rgb_val not in ('00000000', 'FFFFFFFF')
+        fg = getattr(c.fill, 'fgColor', None)
+        if fg is None:
+            return False
+        rgb = getattr(fg, 'rgb', None)
+        if rgb:
+            ru = str(rgb).upper()
+            if ru in ('00000000', '00000000FF', 'FFFFFFFF', '00FFFFFF', 'FF000000'):
+                return False
+            if ru[-6:] in ('000000', 'FFFFFF'):
+                return False
+            return True
+        indexed = getattr(fg, 'indexed', None)
+        if indexed is not None:
+            return indexed != 0
+        theme = getattr(fg, 'theme', None)
+        if theme is not None:
+            return True
+    except Exception:
         return False
-    except:
-        return False
-        
-# --- CÁC HÀM CHO CÔNG CỤ 1: SAO CHÉP & ÁNH XẠ ---
+    return False
 
-def tool1_excel_col_to_index(col_letter):
-    index = 0
-    for char in col_letter.upper():
-        index = index * 26 + (ord(char) - ord('A')) + 1
-    return index - 1
+# --- CÁC HÀM XỬ LÝ ---
 
-def tool1_get_sheet_names_from_buffer(file_buffer):
+def run_step_1_process(wb, sheet_name, master_progress_bar, master_status_label, base_percent, step_budget):
+    """
+    Bước 1: Nhận workbook, tên sheet và đối tượng UI Streamlit.
+    Trả về workbook đã xử lý.
+    """
+    
+    def update_progress_step1(local_percent, step_text=None):
+        """Cập nhật UI Streamlit"""
+        if step_text:
+            master_status_label.info(f"Bước 1: {step_text} ({local_percent:.0f}%)")
+        master_percent = base_percent + (local_percent / 100) * step_budget
+        master_progress_bar.progress(int(master_percent))
+    
     try:
-        wb = load_workbook(file_buffer, read_only=True)
-        return wb.sheetnames
-    except Exception as e:
-        st.error(f"Không thể đọc sheet từ file: {e}")
-        return []
-
-def tool1_transform_and_copy(source_buffer, source_sheet, dest_buffer, dest_sheet, progress_bar, status_label):
-    try:
-        # 1. Đọc dữ liệu nguồn
-        status_label.info("Đang đọc dữ liệu từ file nguồn...")
-        source_cols_letters = list(TOOL1_COLUMN_MAPPING.keys())
-        source_cols_indices = [tool1_excel_col_to_index(col) for col in source_cols_letters]
-        df_source = pd.read_excel(source_buffer, sheet_name=source_sheet, header=None, skiprows=2, usecols=source_cols_indices, engine='openpyxl')
-        df_source.columns = source_cols_letters
-        df_source_renamed = df_source.rename(columns=TOOL1_COLUMN_MAPPING)
-        progress_bar.progress(20)
-
-        # 2. Mở workbook đích
-        status_label.info("Đang mở file đích để ghi dữ liệu...")
-        wb_dest = load_workbook(dest_buffer)
-        if dest_sheet not in wb_dest.sheetnames:
-            st.error(f"Lỗi: Không tìm thấy sheet '{dest_sheet}' trong file đích.")
-            return None
-        ws_dest = wb_dest[dest_sheet]
-        progress_bar.progress(40)
-
-        # 3. Ghi dữ liệu
-        status_label.info("Đang sao chép dữ liệu...")
-        dest_cols = list(TOOL1_COLUMN_MAPPING.values())
-        total_rows = len(df_source_renamed)
-        for i, dest_col in enumerate(dest_cols):
-            col_index_dest = tool1_excel_col_to_index(dest_col)
-            for j, value in enumerate(df_source_renamed[dest_col], start=TOOL1_START_ROW_DESTINATION):
-                cell_value = value if pd.notna(value) else None
-                ws_dest.cell(row=j, column=col_index_dest + 1, value=cell_value)
-            
-            progress_bar.progress(40 + int((i + 1) / len(dest_cols) * 40))
-
-        # 4. Kẻ viền
-        status_label.info("Đang kẻ viền cho vùng dữ liệu mới...")
-        thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-        end_row_border = TOOL1_START_ROW_DESTINATION + total_rows - 1
-        for row in ws_dest.iter_rows(min_row=TOOL1_START_ROW_DESTINATION, max_row=end_row_border, min_col=1, max_col=50): # A -> AX
-            for cell in row:
-                cell.border = thin_border
-        progress_bar.progress(95)
-
-        # 5. Lưu kết quả vào buffer
-        status_label.info("Đang lưu kết quả...")
-        output_buffer = io.BytesIO()
-        wb_dest.save(output_buffer)
-        output_buffer.seek(0)
-        progress_bar.progress(100)
-        return output_buffer
-
-    except Exception as e:
-        st.error(f"Đã xảy ra lỗi trong quá trình xử lý: {e}")
-        logging.error(f"Lỗi Công cụ 1: {e}")
-        return None
-
-# --- CÁC HÀM CHO CÔNG CỤ 2 & 3: LÀM SẠCH, PHÂN LOẠI & TÁCH FILE ---
-
-def run_step_1_process(wb, sheet_name, progress_bar, status_label, base_percent, step_budget):
-    # (Giữ nguyên code gốc của bạn)
-    # ...
-    try:
-        def update_progress(local_percent, step_text=""):
-            status_label.info(f"Bước 1: {step_text}...")
-            master_percent = base_percent + (local_percent / 100) * step_budget
-            progress_bar.progress(int(master_percent))
-
-        update_progress(0, "Kiểm tra sheet")
         if sheet_name not in wb.sheetnames:
             st.error(f"Lỗi Bước 1: Không tìm thấy sheet '{sheet_name}'.")
             return None
         ws = wb[sheet_name]
+
         last_row = ws.max_row
+        while last_row > 1 and ws[f"A{last_row}"].value in (None, ""):
+            last_row -= 1
         
-        update_progress(10, "Tìm hàng thiếu dữ liệu")
+        update_progress_step1(0, "Đang tìm hàng trống...")
         rows_to_color = set()
-        for row_idx in range(STEP1_START_ROW, last_row + 1):
+        total_check_rows = last_row - STEP1_START_ROW + 1
+        
+        for i, row_idx in enumerate(range(STEP1_START_ROW, last_row + 1)):
             for col in STEP1_CHECK_COLS:
                 cell_value = ws[f"{col}{row_idx}"].value
                 if cell_value is None or str(cell_value).strip() == "":
                     rows_to_color.add(row_idx)
                     break
-        
-        update_progress(30, "Xóa màu nền cũ")
-        for row in ws.iter_rows(min_row=1, max_row=last_row):
+            if i % 100 == 0:
+                update_progress_step1((i / max(total_check_rows, 1)) * 10, "Đang tìm hàng trống...")
+
+        update_progress_step1(10, "Đang xoá màu cũ...")
+        for i, row in enumerate(ws.iter_rows(min_row=1, max_row=last_row), start=1):
             for cell in row:
                 cell.fill = STEP1_EMPTY_FILL
-
-        update_progress(40, "Tô màu vàng các hàng thiếu dữ liệu")
-        for row_idx in rows_to_color:
+            if i % 50 == 0:
+                percent = 10 + (i / last_row) * 20
+                update_progress_step1(min(percent, 30), "Đang xoá màu cũ...")
+        
+        update_progress_step1(30, "Đang tô vàng...")
+        for idx, row_idx in enumerate(rows_to_color, start=1):
             for cell in ws[row_idx]:
                 cell.fill = STEP1_YELLOW_FILL
+            if idx % 50 == 0:
+                percent = 30 + (idx / max(len(rows_to_color), 1)) * 10
+                update_progress_step1(min(percent, 40), "Đang tô vàng hàng trống...")
 
-        update_progress(50, "Chuẩn bị tách sheet")
-        def copy_to_new_sheet(title, condition_fn):
+        update_progress_step1(40, "Đang xuất Nhóm 1...")
+        ws_src = wb[sheet_name]
+        last_col = ws_src.max_column
+
+        def copy_rows_step1(title, condition_fn, start_percent, end_percent):
             if title in wb.sheetnames:
                 wb.remove(wb[title])
             ws_dst = wb.create_sheet(title)
-            # Copy header
             for r in range(1, 5):
-                for c in range(1, ws.max_column + 1):
-                    src = ws.cell(row=r, column=c)
-                    dst = ws_dst.cell(row=r, column=c)
-                    dst.value = src.value
-                    if src.has_style:
-                        helper_copy_cell_format(src, dst)
-            # Copy data rows
-            next_row = 5
-            for r in range(5, last_row + 1):
-                if condition_fn(r):
-                    for c in range(1, ws.max_column + 1):
-                        src = ws.cell(row=r, column=c)
-                        dst = ws_dst.cell(row=next_row, column=c)
-                        dst.value = src.value
-                        if src.has_style:
-                            helper_copy_cell_format(src, dst)
-                    next_row += 1
-            helper_calculate_column_width(ws_dst)
-        
-        update_progress(60, "Tạo sheet 'Nhóm 1' (đủ dữ liệu)")
-        copy_to_new_sheet("Nhóm 1", lambda r_idx: r_idx not in rows_to_color)
-        
-        update_progress(80, "Tạo sheet 'Nhóm 2' (thiếu dữ liệu)")
-        copy_to_new_sheet("Nhóm 2", lambda r_idx: r_idx in rows_to_color)
-        
-        update_progress(100, "Hoàn tất Bước 1")
-        return wb
-    except Exception as e:
-        st.error(f"Lỗi nghiêm trọng (Bước 1): {e}")
-        logging.error(f"Lỗi Bước 1: {e}")
-        return None
-
-def run_step_2_clear_fill(wb, progress_bar, status_label, base_percent, step_budget):
-    # (Giữ nguyên code gốc của bạn)
-    # ...
-    try:
-        TARGET_SHEET = "Nhóm 2"
-        def update_progress(local_percent, step_text=""):
-            status_label.info(f"Bước 2: {step_text}...")
-            master_percent = base_percent + (local_percent / 100) * step_budget
-            progress_bar.progress(int(master_percent))
-
-        update_progress(0, f"Kiểm tra sheet '{TARGET_SHEET}'")
-        if TARGET_SHEET not in wb.sheetnames:
-            st.warning(f"Cảnh báo (Bước 2): Không tìm thấy sheet '{TARGET_SHEET}', bỏ qua.")
-            update_progress(100, "Bỏ qua")
-            return wb
-        ws = wb[TARGET_SHEET]
-        
-        update_progress(20, "Xóa màu theo điều kiện cột G")
-        for row_idx in range(STEP2_START_ROW, ws.max_row + 1):
-            cell_g_val = ws[f"{STEP2_TARGET_COL}{row_idx}"].value
-            if cell_g_val is not None and str(cell_g_val).strip() != "":
-                for cell_in_row in ws[row_idx]:
-                    cell_in_row.fill = STEP2_EMPTY_FILL
-        
-        update_progress(100, "Hoàn tất Bước 2")
-        return wb
-    except Exception as e:
-        st.error(f"Lỗi nghiêm trọng (Bước 2): {e}")
-        logging.error(f"Lỗi Bước 2: {e}")
-        return None
-
-def run_step_3_split_by_color(wb, progress_bar, status_label, base_percent, step_budget):
-    # (Giữ nguyên code gốc của bạn)
-    # ...
-    try:
-        TARGET_SHEET = "Nhóm 2"
-        def update_progress(local_percent, step_text=""):
-            status_label.info(f"Bước 3: {step_text}...")
-            master_percent = base_percent + (local_percent / 100) * step_budget
-            progress_bar.progress(int(master_percent))
-
-        update_progress(0, f"Kiểm tra sheet '{TARGET_SHEET}'")
-        if TARGET_SHEET not in wb.sheetnames:
-            st.warning(f"Cảnh báo (Bước 3): Không tìm thấy sheet '{TARGET_SHEET}', bỏ qua.")
-            update_progress(100, "Bỏ qua")
-            return wb
-        ws_src = wb[TARGET_SHEET]
-
-        def copy_to_new_sheet(title, condition_fn):
-            if title in wb.sheetnames:
-                wb.remove(wb[title])
-            ws_dst = wb.create_sheet(title)
-            # Copy header
-            for r in range(1, 5):
-                for c in range(1, ws_src.max_column + 1):
+                for c in range(1, last_col + 1):
                     src = ws_src.cell(row=r, column=c)
                     dst = ws_dst.cell(row=r, column=c)
                     dst.value = src.value
                     if src.has_style:
                         helper_copy_cell_format(src, dst)
-            # Copy data
             next_row = 5
-            for r in range(5, ws_src.max_row + 1):
-                if condition_fn(ws_src.cell(row=r, column=1)):
-                    for c in range(1, ws_src.max_column + 1):
+            total_data_rows = last_row - 4
+            for i, r in enumerate(range(5, last_row + 1), start=1):
+                if condition_fn(r):
+                    for c in range(1, last_col + 1):
                         src = ws_src.cell(row=r, column=c)
                         dst = ws_dst.cell(row=next_row, column=c)
                         dst.value = src.value
                         if src.has_style:
                             helper_copy_cell_format(src, dst)
                     next_row += 1
+                if i % 20 == 0:
+                    progress = start_percent + (i / max(total_data_rows, 1)) * (end_percent - start_percent)
+                    update_progress_step1(min(progress, end_percent), f"Đang xử lý {title}...")
+            
+            # Tính độ rộng cột thủ công
             helper_calculate_column_width(ws_dst)
 
-        update_progress(25, "Tạo sheet 'Nhóm 2_TC' (không màu)")
-        copy_to_new_sheet("Nhóm 2_TC", lambda c: not helper_cell_has_bg(c))
+        copy_rows_step1("Nhóm 1", lambda r_idx: r_idx not in rows_to_color, 40, 70)
+        copy_rows_step1("Nhóm 2", lambda r_idx: r_idx in rows_to_color, 70, 99)
         
-        update_progress(75, "Tạo sheet 'Nhóm 2_GDC' (còn màu)")
-        copy_to_new_sheet("Nhóm 2_GDC", lambda c: helper_cell_has_bg(c))
-        
-        update_progress(100, "Hoàn tất Bước 3")
+        update_progress_step1(100, "Hoàn tất Bước 1!")
+        return wb
+
+    except Exception as e:
+        st.error(f"Lỗi nghiêm trọng (Bước 1): {e}")
+        logging.error(f"Lỗi Bước 1: {e}")
+        return None
+
+def run_step_2_clear_fill(wb, master_progress_bar, master_status_label, base_percent, step_budget):
+    """Bước 2: Nhận workbook, trả về workbook đã xử lý"""
+    TARGET_SHEET = "Nhóm 2"
+    
+    try:
+        logging.info(f"Bước 2: Bắt đầu xử lý sheet {TARGET_SHEET}")
+        if TARGET_SHEET not in wb.sheetnames:
+            st.error(f"Lỗi (Bước 2): Không tìm thấy sheet '{TARGET_SHEET}' để xử lý.")
+            return None
+        ws = wb[TARGET_SHEET]
+        last_row = ws.max_row
+        while last_row > 1 and ws[f"A{last_row}"].value in (None, ""):
+            last_row -= 1
+        rows_changed = 0
+
+        for row_idx in range(STEP2_START_ROW, last_row + 1):
+            cell_g = ws[f"{STEP2_TARGET_COL}{row_idx}"]
+            is_blank = (cell_g.value is None or str(cell_g.value).strip() == "")
+            if not is_blank:
+                for cell_in_row in ws[row_idx]:
+                    cell_in_row.fill = STEP2_EMPTY_FILL
+                rows_changed += 1
+            if row_idx % 50 == 0:
+                local_percent = (row_idx / max(last_row, 1)) * 100
+                master_status_label.info(f"Bước 2: Đang xoá màu cột G... ({local_percent:.0f}%)")
+                master_percent = base_percent + (local_percent / 100) * step_budget
+                master_progress_bar.progress(int(master_percent))
+
+        master_progress_bar.progress(int(base_percent + step_budget))
+        logging.info(f"Bước 2: Hoàn tất, đã xoá màu {rows_changed} hàng.")
+        return wb
+    except Exception as e:
+        st.error(f"Lỗi nghiêm trọng (Bước 2): {e}")
+        logging.error(f"Lỗi Bước 2: {e}")
+        return None
+
+def run_step_3_split_by_color(wb, master_progress_bar, master_status_label, base_percent, step_budget):
+    """Bước 3: Nhận workbook, trả về workbook đã xử lý"""
+    TARGET_SHEET = "Nhóm 2"
+    
+    try:
+        logging.info(f"Bước 3: Bắt đầu xử lý sheet {TARGET_SHEET}")
+        if TARGET_SHEET not in wb.sheetnames:
+            st.error(f"Lỗi (Bước 3): Không tìm thấy sheet '{TARGET_SHEET}' để xử lý.")
+            return None
+        ws_src = wb[TARGET_SHEET]
+        last_row = ws_src.max_row
+        last_col = ws_src.max_column
+
+        def copy_rows_step3(condition_fn, title):
+            if title in wb.sheetnames:
+                wb.remove(wb[title])
+            ws_dst = wb.create_sheet(title)
+            for row in range(1, 5):
+                for col in range(1, last_col + 1):
+                    cell_src = ws_src.cell(row=row, column=col)
+                    cell_dst = ws_dst.cell(row=row, column=col)
+                    cell_dst.value = cell_src.value
+                    if cell_src.has_style:
+                        helper_copy_cell_format(cell_src, cell_dst)
+            next_row = 5
+            for row in range(5, last_row + 1):
+                cell = ws_src.cell(row=row, column=1)
+                if condition_fn(cell):
+                    for col in range(1, last_col + 1):
+                        cell_src = ws_src.cell(row=row, column=col)
+                        cell_dst = ws_dst.cell(row=next_row, column=col)
+                        cell_dst.value = cell_src.value
+                        if cell_src.has_style:
+                            helper_copy_cell_format(cell_src, cell_dst)
+                    next_row += 1
+            
+            # Tính độ rộng cột thủ công
+            helper_calculate_column_width(ws_dst)
+
+        total_steps = 2 * (last_row - 4)
+        processed = 0
+
+        def update_progress_step3(add, message):
+            nonlocal processed
+            processed += add
+            local_percent = (processed / max(total_steps, 1)) * 100
+            master_status_label.info(f"Bước 3: {message} ({local_percent:.0f}%)")
+            master_percent = base_percent + (local_percent / 100) * step_budget
+            master_progress_bar.progress(int(master_percent))
+
+        copy_rows_step3(lambda c: not helper_cell_has_bg(c), "Nhóm 2_TC")
+        update_progress_step3(last_row - 4, "Đang xuất Nhóm 2_TC (không màu)...")
+
+        copy_rows_step3(lambda c: helper_cell_has_bg(c), "Nhóm 2_GDC")
+        update_progress_step3(last_row - 4, "Đang xuất Nhóm 2_GDC (có màu)...")
+
+        master_progress_bar.progress(int(base_percent + step_budget))
+        logging.info("Bước 3: Hoàn tất, đã tạo 'Nhóm 2_TC' và 'Nhóm 2_GDC'.")
         return wb
     except Exception as e:
         st.error(f"Lỗi nghiêm trọng (Bước 3): {e}")
         logging.error(f"Lỗi Bước 3: {e}")
         return None
 
-def run_step_4_split_files(data_buffer, progress_bar, status_label, base_percent, step_budget):
-    # (Giữ nguyên code gốc của bạn, chỉ điều chỉnh lại một chút cho rõ ràng)
-    # ...
+def run_step_4_split_files(
+    step4_data_buffer, 
+    main_processed_buffer, 
+    main_processed_filename, 
+    master_progress_bar, 
+    master_status_label, 
+    base_percent, 
+    step_budget
+):
+    """
+    Bước 4: (Phiên bản Online) Tách file chỉ dùng openpyxl/pandas.
+    """
+    wb_openpyxl = None
+    
     DATA_SHEET = "Nhóm 2_GDC"
     TEMPLATE_SHEET = "TongHop"
     FILTER_COLUMN = "T"
     START_ROW = 5
     
     try:
-        def update_progress(local_percent, step_text=""):
-            status_label.info(f"Bước 4: {step_text}...")
-            master_percent = base_percent + (local_percent / 100) * step_budget
-            progress_bar.progress(int(master_percent))
-
-        update_progress(0, "Đọc dữ liệu từ bộ nhớ")
-        wb_main = load_workbook(data_buffer, data_only=True)
+        logging.info("Bước 4 (Online): Bắt đầu xử lý tách file")
         
-        if TEMPLATE_SHEET not in wb_main.sheetnames or DATA_SHEET not in wb_main.sheetnames:
-            st.error(f"Lỗi: File đầu vào phải chứa sheet '{TEMPLATE_SHEET}' và '{DATA_SHEET}'.")
+        # 1. Đọc template và data từ buffer workbook
+        try:
+            wb_openpyxl = load_workbook(step4_data_buffer, data_only=True)
+            if TEMPLATE_SHEET not in wb_openpyxl.sheetnames:
+                st.error("Lỗi (Bước 4): Không tìm thấy sheet mẫu 'TongHop'!")
+                return None
+            if DATA_SHEET not in wb_openpyxl.sheetnames:
+                st.error("Lỗi (Bước 4): Không tìm thấy sheet dữ liệu 'Nhóm 2_GDC'!")
+                return None
+            tonghop_ws = wb_openpyxl["TongHop"]
+            
+            step4_data_buffer.seek(0)
+            df = pd.read_excel(step4_data_buffer, sheet_name=DATA_SHEET, header=None)
+            logging.info("Đã tải thành công template và data từ buffer")
+        except Exception as e:
+            st.error(f"Lỗi (Bước 4): Không thể đọc buffer: {e}")
+            logging.error(f"Bước 4: Lỗi đọc buffer: {e}")
             return None
 
-        template_ws = wb_main[TEMPLATE_SHEET]
-        data_buffer.seek(0)
-        df = pd.read_excel(data_buffer, sheet_name=DATA_SHEET, header=None)
-
-        update_progress(10, f"Lọc giá trị duy nhất từ cột '{FILTER_COLUMN}'")
+        # 2. Logic lọc
         col_index = column_index_from_string(FILTER_COLUMN) - 1
-        data_col = df.iloc[START_ROW - 1:, col_index].apply(helper_normalize_value)
-        unique_values = data_col.dropna().unique().tolist()
-        if data_col.isnull().any():
-            unique_values.append("BLANK")
-
-        if not unique_values:
-            st.warning("Không tìm thấy giá trị nào để tách file.")
+        start_row_index = START_ROW - 1
+        if col_index >= len(df.columns):
+            st.error(f"Lỗi (Bước 4): Cột lọc '{FILTER_COLUMN}' không tồn tại!")
             return None
-
-        update_progress(20, f"Chuẩn bị tách thành {len(unique_values)} file con")
         
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_f, tempfile.TemporaryDirectory() as tmpdir:
-            total = len(unique_values)
-            for i, value in enumerate(unique_values, start=1):
-                mask = data_col.isnull() if value == "BLANK" else (data_col == value)
-                filtered_df = df.iloc[START_ROW - 1:][mask]
-                
-                if not filtered_df.empty:
-                    new_wb = Workbook()
-                    new_ws = new_wb.active
-                    new_ws.title = "DuLieuLoc"
-                    
-                    # Copy header from template
-                    for r in range(1, 4):
-                        for c in range(1, template_ws.max_column + 1):
-                            src = template_ws.cell(row=r, column=c)
-                            dst = new_ws.cell(row=r, column=c)
-                            dst.value = src.value
-                            helper_copy_cell_format(src, dst)
-                    
-                    for r_idx, row_data in enumerate(dataframe_to_rows(filtered_df, index=False, header=False), start=4):
-                        for c_idx, cell_val in enumerate(row_data, start=1):
-                            new_ws.cell(row=r_idx, column=c_idx, value=cell_val)
+        data_col_raw = df.iloc[start_row_index:, col_index]
+        data_col = data_col_raw.apply(helper_normalize_value)
+        unique_normalized = data_col.dropna().unique().tolist()
+        if data_col.isnull().any():
+            unique_normalized.append("BLANK")
 
+        total = len(unique_normalized)
+        master_status_label.info(f"Bước 4: Chuẩn bị tách {total} file con...")
+
+        # 3. Dùng thư mục tạm để lưu file
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logging.info(f"Đã tạo thư mục tạm: {tmpdir}")
+            
+            # Lưu file Excel chính đã xử lý vào thư mục tạm
+            try:
+                main_file_path = os.path.join(tmpdir, main_processed_filename)
+                with open(main_file_path, 'wb') as f:
+                    f.write(main_processed_buffer.getbuffer())
+                logging.info(f"Đã lưu file chính vào: {main_file_path}")
+            except Exception as e_save_main:
+                logging.warning(f"Không thể lưu file chính vào zip: {e_save_main}")
+
+            # 4. Lặp qua các giá trị duy nhất để tách file
+            for i, norm_value in enumerate(unique_normalized, start=1):
+                if norm_value == "BLANK":
+                    mask = data_col.isnull()
+                else:
+                    mask = data_col == norm_value
+                filtered = df.iloc[start_row_index:][mask]
+                if filtered.empty:
+                    continue
+
+                # Tạo file con bằng openpyxl
+                new_wb = Workbook()
+                new_ws = new_wb.active
+                new_ws.title = "DuLieuLoc"
+                helper_copy_rows_with_style(tonghop_ws, new_ws, max_row=3)
+                for r_idx, row in enumerate(dataframe_to_rows(filtered, index=False, header=False), start=4):
+                    for c_idx, value_cell in enumerate(row, start=1):
+                        new_ws.cell(row=r_idx, column=c_idx, value=value_cell)
+                
+                safe_name = "BLANK" if norm_value == "BLANK" else re.sub(r'[\\/*?:<>|"\t\n\r]+', "_", str(norm_value).strip())[:50]
+                output_path = helper_get_safe_filepath(tmpdir, safe_name)
+                
+                try:
+                    # Group cột và tính độ rộng
+                    helper_group_columns_openpyxl(new_ws)
                     helper_calculate_column_width(new_ws)
-                    
-                    safe_name = "BLANK" if value == "BLANK" else re.sub(r'[\\/*?:<>|"\t\n\r]+', "_", str(value).strip())[:50]
-                    output_path = os.path.join(tmpdir, f"{safe_name}.xlsx")
+                    # Lưu file
                     new_wb.save(output_path)
-                    zip_f.write(output_path, arcname=os.path.basename(output_path))
-                
-                local_percent = 20 + (i / total) * 75
-                update_progress(local_percent, f"Đang tách file {i}/{total}")
+                except Exception as e_openpyxl:
+                    logging.error(f"Lỗi openpyxl khi xử lý {output_path}: {e_openpyxl}")
+                finally:
+                    if new_wb: new_wb.close() 
 
-        update_progress(100, "Hoàn tất nén file ZIP")
-        zip_buffer.seek(0)
-        return zip_buffer
+                # Cập nhật progress bar
+                local_percent = (i / total) * 100
+                master_status_label.info(f"Bước 4: Đang tách file {i}/{total} ({local_percent:.0f}%)")
+                master_percent = base_percent + (local_percent / 100) * step_budget
+                master_progress_bar.progress(int(master_percent))
+            
+            # 5. Nén thư mục tạm thành file ZIP trong bộ nhớ
+            master_status_label.info("Bước 4: Đang nén file ZIP...")
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_f:
+                for root, _, files in os.walk(tmpdir):
+                    for file in files:
+                        zip_f.write(os.path.join(root, file), arcname=file)
+            
+            zip_buffer.seek(0)
+            master_progress_bar.progress(int(base_percent + step_budget))
+            logging.info("Đã tạo ZIP buffer thành công.")
+            
+            # 6. Dọn dẹp
+            if wb_openpyxl: wb_openpyxl.close()
+            
+            return zip_buffer # Trả về buffer file ZIP
 
     except Exception as e:
-        st.error(f"Lỗi nghiêm trọng (Bước 4): {e}")
-        logging.error(f"Lỗi Bước 4: {e}")
+        st.error(f"Lỗi nghiêm trọng (Bước 4 - Online): {str(e)}")
+        logging.error(f"Lỗi Bước 4 (Online): {e}")
         return None
+    finally:
+        if wb_openpyxl:
+            try: wb_openpyxl.close()
+            except: pass
 
 # --- GIAO DIỆN STREAMLIT CHÍNH ---
 
-st.set_page_config(page_title="Công cụ Dữ liệu Đất đai", layout="wide", page_icon="📊")
+st.set_page_config(page_title="TSCopyRight", layout="wide", page_icon="🚀")
 
-with st.sidebar:
-    st.image("https://i.imgur.com/v12A61a.png", width=150)
-    st.title("Hướng dẫn sử dụng")
-    st.info("**Công cụ 1: Sao chép & Ánh xạ Cột**\n\n- Tải lên file Nguồn và file Đích.\n- Chọn sheet tương ứng.\n- Công cụ sẽ sao chép dữ liệu từ nguồn sang đích theo cấu hình định sẵn.")
-    st.info("**Công cụ 2: Làm sạch & Phân loại**\n\n- Tải file Excel gốc, chọn sheet.\n- Công cụ sẽ làm sạch, tô màu và phân loại dữ liệu thành các sheet `Nhóm 1`, `Nhóm 2`...")
-    st.info("**Công cụ 3: Tách file theo Thôn**\n\n- Tải file đã xử lý bởi Công cụ 2.\n- Công cụ sẽ tách sheet `Nhóm 2_GDC` thành nhiều file con và nén lại thành tệp ZIP.")
-    st.success("Phát triển bởi: **Trường Sinh**\n\nSĐT: **0917.750.555**")
+# --- SIDEBAR ---
+st.sidebar.title("Hướng dẫn sử dụng")
+st.sidebar.markdown("""
+- **Kế hoạch số 515/KH-BCA-BNN&MT ngày 31/8/2025 của Bộ Công an và Bộ Nông nghiệp và Môi trường về việc triển khai thực hiện chiến dịch làm giàu, làm sạch cơ sở dữ liệu quốc gia về đất đai.
+- **Công văn số 780/UBND-NNMT ngày 04/9/2025 của UBND tỉnh Quảng Trị về việc triển khai Kế hoạch số 515/KH-BCA-BNN&MT.
+- **Công văn số 2071/QLĐĐ-TKKKTTĐĐ ngày 05/9/2025 của Cục Quản lý đất đai về việc hướng dẫn tổ chức thực hiện chiến dịch làm giàu, làm sạch cơ sở dữ liệu quốc gia về đất đai.
+- **Công văn số 1730/SNNMT-ĐĐBĐVT ngày 08/9/2025 của Sở Nông nghiệp và Môi trường tỉnh Quảng Trị về việc triển khai Kế hoạch số 515/KH-BCA-BNN&MT.
+- **Quyết định 1392/QĐ-UBND ngày 10/9/2025, của UBND tỉnh về việc thành lập Tổ công tác.
+- **Kế hoạch số 847/KH-UBND ngày 10/9/2025, của UBND tỉnh Quảng Trị về triển khai thực hiện chiến dịch làm giàu, làm sạch cơ sở dữ liệu đất đai.
+- **Công văn số 2240/QLĐĐ-TKKKTTĐĐ ngày 19/9/2025, về việc phối hợp với các đơn vị phần mềm trong thực hiện Kế hoạch số 515/KH-BCA-BNN&MT.
+- **Công văn số /QLĐĐ-TKKKTTĐĐ Tháng 10 năm 2025, về tài liệu hướng dẫn bổ sung theo Công văn số 2071/QLĐĐ-TKKKTTĐĐ.
+""")
+st.sidebar.info("Phát triển dựa trên quy trình nghiệp vụ của Trường Sinh - SĐT 0917.750.555.")
 
-st.title("📊 Tổng hợp Công cụ Hỗ trợ Xử lý Dữ liệu Đất đai")
+# --- MAIN PAGE ---
+st.title("Chiến Dịch Xây Dựng Cơ Sở Dữ Liệu Đất Đai")
+st.header("Công cụ Hỗ trợ Làm sạch & Phân loại Dữ liệu")
 st.markdown("---")
 
-tab1, tab2, tab3 = st.tabs([
-    " CÔNG CỤ 1: SAO CHÉP & ÁNH XẠ CỘT ", 
-    " CÔNG CỤ 2: LÀM SẠCH & PHÂN LOẠI ", 
-    " CÔNG CỤ 3: TÁCH FILE THEO THÔN "
-])
+# --- Step 1: Upload ---
+st.markdown("### Bước 1: Tải lên File Excel")
+uploaded_file = st.file_uploader("Chọn file Excel của bạn (.xlsx, .xlsm)", type=["xlsx", "xlsm"])
 
-# --- GIAO DIỆN CÔNG CỤ 1 ---
-with tab1:
-    st.header("Chuyển đổi và sao chép dữ liệu giữa hai file Excel")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        source_file = st.file_uploader("1. Tải lên File Nguồn (lấy dữ liệu)", type=["xlsx", "xls"], key="tool1_source")
-        if source_file:
-            source_sheets = tool1_get_sheet_names_from_buffer(source_file)
-            selected_source_sheet = st.selectbox("2. Chọn Sheet Nguồn:", source_sheets, key="tool1_source_sheet")
-    
-    with col2:
-        dest_file = st.file_uploader("3. Tải lên File Đích (nhận dữ liệu)", type=["xlsx", "xls"], key="tool1_dest")
-        if dest_file:
-            dest_sheets = tool1_get_sheet_names_from_buffer(dest_file)
-            selected_dest_sheet = st.selectbox("4. Chọn Sheet Đích:", dest_sheets, key="tool1_dest_sheet")
+if uploaded_file:
+    st.markdown("---")
+    # --- Step 2: Select Sheet ---
+    st.markdown("### Bước 2: Chọn Sheet")
+    try:
+        # Tải workbook để lấy tên sheet
+        wb_sheets = load_workbook(uploaded_file, read_only=True)
+        sheet_names = wb_sheets.sheetnames
+        wb_sheets.close()
+        
+        selected_sheet = st.selectbox("Chọn sheet chính để xử lý:", sheet_names, help="Đây là sheet gốc chứa dữ liệu bạn muốn lọc.")
 
-    if st.button("BẮT ĐẦU SAO CHÉP DỮ LIỆU", type="primary", key="tool1_start"):
-        if source_file and dest_file and selected_source_sheet and selected_dest_sheet:
-            progress_bar_1 = st.progress(0)
-            status_text_1 = st.empty()
-            
-            result_buffer = tool1_transform_and_copy(
-                source_file, selected_source_sheet,
-                dest_file, selected_dest_sheet,
-                progress_bar_1, status_text_1
-            )
-            
-            if result_buffer:
-                status_text_1.success("✅ HOÀN TẤT! Vui lòng tải file đích đã được cập nhật về.")
-                st.download_button(
-                    label="📥 Tải về File Đích đã cập nhật",
-                    data=result_buffer,
-                    file_name=f"[Updated]_{dest_file.name}",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-        else:
-            st.warning("Vui lòng tải lên cả hai file và chọn sheet tương ứng.")
-
-# --- GIAO DIỆN CÔNG CỤ 2 ---
-with tab2:
-    st.header("Xử lý file tổng, tạo các nhóm dữ liệu")
-    uploaded_file_2 = st.file_uploader("1. Tải lên file Excel cần xử lý", type=["xlsx", "xlsm"], key="tool2_uploader")
-
-    if uploaded_file_2:
-        try:
-            sheets_2 = tool1_get_sheet_names_from_buffer(uploaded_file_2)
-            selected_sheet_2 = st.selectbox("2. Chọn sheet chính chứa dữ liệu:", sheets_2, key="tool2_sheet")
-
-            if st.button("BẮT ĐẦU LÀM SẠCH & PHÂN LOẠI", type="primary", key="tool2_start"):
-                progress_bar_2 = st.progress(0)
-                status_text_2 = st.empty()
-                main_wb_2 = load_workbook(uploaded_file_2)
+        # --- Step 3: Confirm ---
+        st.markdown("### Bước 3: Xác nhận")
                 
-                main_wb_2 = run_step_1_process(main_wb_2, selected_sheet_2, progress_bar_2, status_text_2, 0, 33)
-                if main_wb_2:
-                    main_wb_2 = run_step_2_clear_fill(main_wb_2, progress_bar_2, status_text_2, 33, 33)
-                if main_wb_2:
-                    main_wb_2 = run_step_3_split_by_color(main_wb_2, progress_bar_2, status_text_2, 66, 34)
+        start_button = st.button("Bắt đầu")
+        st.markdown("---")
 
-                if main_wb_2:
-                    status_text_2.success("✅ HOÀN TẤT! Vui lòng tải file về.")
-                    final_buffer_2 = io.BytesIO()
-                    main_wb_2.save(final_buffer_2)
-                    final_buffer_2.seek(0)
-                    st.download_button(label="📥 Tải về File đã xử lý", data=final_buffer_2, file_name=f"[Processed]_{uploaded_file_2.name}", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        except Exception as e:
-            st.error(f"Lỗi: {e}")
-
-# --- GIAO DIỆN CÔNG CỤ 3 ---
-with tab3:
-    st.header("Tách file từ sheet 'Nhóm 2_GDC' thành nhiều file con")
-    uploaded_file_3 = st.file_uploader("1. Tải lên file Excel ĐÃ ĐƯỢC XỬ LÝ bởi Công cụ 2", type=["xlsx", "xlsm"], key="tool3_uploader", help="File này phải chứa sheet 'Nhóm 2_GDC' và 'TongHop'.")
-
-    if uploaded_file_3:
-        if st.button("BẮT ĐẦU TÁCH FILE", type="primary", key="tool3_start"):
-            progress_bar_3 = st.progress(0)
-            status_text_3 = st.empty()
-            data_buffer_3 = io.BytesIO(uploaded_file_3.getvalue())
+        if start_button:
+            # --- Step 4: Process & Download ---
+            st.markdown("### Bước 4: Hoàn thành và Tải về")
             
-            zip_buffer = run_step_4_split_files(data_buffer_3, progress_bar_3, status_text_3, 0, 100)
+            # Tạo thanh progress bar và status text
+            progress_bar = st.progress(0)
+            status_text_area = st.empty()
+            
+            try:
+                # Tải workbook chính vào bộ nhớ để xử lý
+                status_text_area.info("Đang tải file vào bộ nhớ...")
+                main_wb = load_workbook(uploaded_file)
+                
+                # --- CHẠY QUY TRÌNH ---
+                
+                # Bước 1
+                main_wb = run_step_1_process(main_wb, selected_sheet, progress_bar, status_text_area, 0, 25)
+                if main_wb is None: raise Exception("Bước 1 thất bại.")
+                
+                # Bước 2
+                main_wb = run_step_2_clear_fill(main_wb, progress_bar, status_text_area, 25, 25)
+                if main_wb is None: raise Exception("Bước 2 thất bại.")
+                
+                # Bước 3
+                main_wb = run_step_3_split_by_color(main_wb, progress_bar, status_text_area, 50, 25)
+                if main_wb is None: raise Exception("Bước 3 thất bại.")
+                
+                # Chuẩn bị buffer cho Bước 4 và file tổng
+                status_text_area.info("Đang chuẩn bị file kết quả...")
+                final_wb_buffer = io.BytesIO()
+                main_wb.save(final_wb_buffer)
+                final_wb_buffer.seek(0)
+                
+                # Cần 2 buffer:
+                # 1. Buffer để Bước 4 đọc dữ liệu ('Nhóm 2_GDC')
+                step4_read_buffer = io.BytesIO(final_wb_buffer.read())
+                # 2. Buffer file chính để Bước 4 lưu vào ZIP (phải seek(0) lại)
+                final_wb_buffer.seek(0) 
+                
+                main_processed_filename = f"[Processed]_{uploaded_file.name}"
+                
+                # Gọi hàm Bước 4 phiên bản ONLINE
+                zip_buffer = run_step_4_split_files(
+                    step4_read_buffer,       # Buffer cho Bước 4 đọc
+                    final_wb_buffer,         # Buffer file chính để lưu
+                    main_processed_filename, # Tên file chính
+                    progress_bar, 
+                    status_text_area, 
+                    75, 
+                    25
+                )
+                if zip_buffer is None: raise Exception("Bước 4 thất bại.")
 
-            if zip_buffer:
-                status_text_3.success("✅ HOÀN TẤT! Vui lòng tải gói ZIP về.")
-                st.download_button(label="🗂️ Tải về Gói file con (.zip)", data=zip_buffer, file_name="Cac_file_con_theo_thon.zip", mime="application/zip")
+                main_wb.close()
+                
+                status_text_area.success("✅ HOÀN TẤT!")
+                progress_bar.progress(100)
+                
+                # Hiển thị 1 nút tải ZIP duy nhất
+                st.download_button(
+                    label="🗂️ Tải về Gói Kết Quả (ZIP)",
+                    data=zip_buffer,
+                    file_name="KetQua_Thon.zip",
+                    mime="application/zip",
+                    help=f"File ZIP này chứa file Excel chính ({main_processed_filename}) VÀ tất cả các file con được tách ra từ 'Nhóm 2_GDC'."
+                )
+                
+            except Exception as e:
+                st.error(f"Quy trình đã dừng do lỗi: {e}")
+                logging.error(f"Lỗi Streamlit Workflow: {e}")
+
+    except Exception as e:
+        st.error(f"Không thể đọc file Excel. File có thể bị hỏng hoặc không đúng định dạng: {e}")
+        logging.error(f"Lỗi Streamlit Tải file: {e}")
 
