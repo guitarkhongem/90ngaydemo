@@ -27,7 +27,7 @@ TOOL1_COLUMN_MAPPING: Dict[str, str] = {
 TOOL1_START_ROW_DESTINATION: int = 7
 
 # --- CẤU HÌNH CÔNG CỤ 2: LÀM SẠCH & TÁCH FILE ---
-STEP1_CHECK_COLS: List[str] =
+STEP1_CHECK_COLS: List[str] = ["D", "E", "F", "I", "J", "L", "M", "R", "S", "T", "U"]
 STEP1_START_ROW: int = 5
 STEP1_YELLOW_FILL = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
 STEP1_EMPTY_FILL = PatternFill(fill_type=None)
@@ -108,7 +108,7 @@ def helper_group_columns_openpyxl(ws):
                 dim.outline_level = 0
                 dim.collapsed = False
 
-        ranges_to_group =
+        ranges_to_group = [("B", "C"), ("G", "H"), ("K", "K"), ("N", "Q"), ("W", "AY")]
 
         for start_col, end_col in ranges_to_group:
             start_idx = column_index_from_string(start_col)
@@ -117,7 +117,7 @@ def helper_group_columns_openpyxl(ws):
             for c_idx in range(start_idx, end_idx + 1):
                 col_letter = get_column_letter(c_idx)
                 if col_letter in ws.column_dimensions:
-                        ws.column_dimensions[col_letter].outline_level = 1
+                    ws.column_dimensions[col_letter].outline_level = 1
 
         logging.info("✅ Group cột thành công bằng openpyxl")
 
@@ -201,10 +201,10 @@ def tool1_transform_and_copy(source_buffer, source_sheet, dest_buffer, dest_shee
         status_label.info("Đang kẻ viền cho vùng dữ liệu mới...")
         thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
         end_row_border = TOOL1_START_ROW_DESTINATION + total_rows_to_write - 1
-        
+
         # Chỉ kẻ viền cho các cột được ghi dữ liệu để tăng tốc
-        all_dest_cols_indices =
-        
+        all_dest_cols_indices = [column_index_from_string(col) for col in TOOL1_COLUMN_MAPPING.values()]
+
         for row in ws_dest.iter_rows(min_row=TOOL1_START_ROW_DESTINATION, max_row=end_row_border):
             for cell in row:
                 if cell.column in all_dest_cols_indices:
@@ -228,12 +228,9 @@ def tool1_transform_and_copy(source_buffer, source_sheet, dest_buffer, dest_shee
 # --- CÁC HÀM CHO CÔNG CỤ 2: LÀM SẠCH, PHÂN LOẠI & TÁCH FILE ---
 
 def run_step_1_process(wb, sheet_name, master_progress_bar, master_status_label, base_percent, step_budget):
-    """
-    Bước 1: Tìm các hàng có ô trống trong các cột chỉ định, tô màu vàng,
-            và tách thành 2 sheet 'Nhóm 1' (đủ dữ liệu) và 'Nhóm 2' (thiếu dữ liệu).
-    """
-    def update_progress(local_percent, step_text=""):
-        master_status_label.info(f"Bước 1: {step_text} ({local_percent:.0f}%)")
+    def update_progress_step1(local_percent, step_text=None):
+        if step_text:
+            master_status_label.info(f"Bước 1: {step_text} ({local_percent:.0f}%)")
         master_percent = base_percent + (local_percent / 100) * step_budget
         master_progress_bar.progress(int(master_percent))
 
@@ -242,69 +239,81 @@ def run_step_1_process(wb, sheet_name, master_progress_bar, master_status_label,
             st.error(f"Lỗi Bước 1: Không tìm thấy sheet '{sheet_name}'.")
             return None
         ws = wb[sheet_name]
+
+        last_row = ws.max_row
+        while last_row > 1 and ws[f"A{last_row}"].value in (None, ""):
+            last_row -= 1
         
-        update_progress(0, "Đang đọc dữ liệu vào bộ nhớ...")
-        # OPTIMIZATION: Đọc dữ liệu vào Pandas DataFrame để xử lý vector hóa, nhanh hơn nhiều lần.
-        # Đọc từ hàng 4 (index 3) để lấy header.
-        data = ws.values
-        cols = next(data) 
-        df = pd.DataFrame(data, columns=cols)
-        
-        # Lấy chỉ số cột cần kiểm tra
-        check_col_indices =
-        
-        update_progress(10, "Đang tìm hàng trống (vector hóa)...")
-        # OPTIMIZATION: Dùng isnull() và any() của Pandas để tìm hàng trống cực nhanh.
-        # Chỉ kiểm tra từ hàng dữ liệu thực tế (STEP1_START_ROW - 1 - 4 header rows)
-        data_start_index = STEP1_START_ROW - 5 
-        is_row_empty_mask = df.iloc[data_start_index:, check_col_indices].isnull().any(axis=1)
-        
-        # Lấy chỉ số thực tế trong DataFrame cho các hàng trống
-        empty_df_indices = is_row_empty_mask[is_row_empty_mask].index
-        
-        update_progress(25, "Đang xoá màu cũ và tô màu mới...")
-        # Tô màu vẫn cần lặp, nhưng giờ ta đã biết chính xác hàng nào cần tô.
-        for row in ws.iter_rows(min_row=STEP1_START_ROW):
+        update_progress_step1(0, "Đang tìm hàng trống...")
+        rows_to_color = set()
+        total_check_rows = last_row - STEP1_START_ROW + 1
+
+        for i, row_idx in enumerate(range(STEP1_START_ROW, last_row + 1)):
+            for col in STEP1_CHECK_COLS:
+                cell_value = ws[f"{col}{row_idx}"].value
+                if cell_value is None or str(cell_value).strip() == "":
+                    rows_to_color.add(row_idx)
+                    break
+            if i % 100 == 0:
+                update_progress_step1((i / max(total_check_rows, 1)) * 10, "Đang tìm hàng trống...")
+
+        update_progress_step1(10, "Đang xoá màu cũ...")
+        for i, row in enumerate(ws.iter_rows(min_row=1, max_row=last_row), start=1):
             for cell in row:
                 cell.fill = STEP1_EMPTY_FILL
+            if i % 50 == 0:
+                percent = 10 + (i / last_row) * 20
+                update_progress_step1(min(percent, 30), "Đang xoá màu cũ...")
         
-        # Lấy chỉ số hàng trong Excel (index + 5)
-        rows_to_color_excel_indices = set(empty_df_indices + STEP1_START_ROW)
-        for row_idx in rows_to_color_excel_indices:
+        update_progress_step1(30, "Đang tô vàng...")
+        for idx, row_idx in enumerate(rows_to_color, start=1):
             for cell in ws[row_idx]:
                 cell.fill = STEP1_YELLOW_FILL
-        
-        update_progress(50, "Đang chuẩn bị tách sheet...")
-        # Tách DataFrame
-        df_nhom1 = df.loc[~df.index.isin(empty_df_indices)]
-        df_nhom2 = df.loc[empty_df_indices]
+            if idx % 50 == 0:
+                percent = 30 + (idx / max(len(rows_to_color), 1)) * 10
+                update_progress_step1(min(percent, 40), "Đang tô vàng hàng trống...")
 
-        def create_sheet_from_df(title, dataframe):
+        update_progress_step1(40, "Đang xuất Nhóm 1...")
+        ws_src = wb[sheet_name]
+        last_col = ws_src.max_column
+
+        def copy_rows_step1(title, condition_fn, start_percent, end_percent):
             if title in wb.sheetnames:
                 wb.remove(wb[title])
             ws_dst = wb.create_sheet(title)
-            
-            # Sao chép 4 hàng header
-            helper_copy_rows_with_style(ws, ws_dst, max_row=4)
-            
-            # OPTIMIZATION: Ghi toàn bộ DataFrame vào sheet bằng dataframe_to_rows, cực nhanh.
-            for r in dataframe_to_rows(dataframe, index=False, header=False):
-                ws_dst.append(r)
+            for r in range(1, 5):
+                for c in range(1, last_col + 1):
+                    src = ws_src.cell(row=r, column=c)
+                    dst = ws_dst.cell(row=r, column=c)
+                    dst.value = src.value
+                    if src.has_style:
+                        helper_copy_cell_format(src, dst)
+            next_row = 5
+            total_data_rows = last_row - 4
+            for i, r in enumerate(range(5, last_row + 1), start=1):
+                if condition_fn(r):
+                    for c in range(1, last_col + 1):
+                        src = ws_src.cell(row=r, column=c)
+                        dst = ws_dst.cell(row=next_row, column=c)
+                        dst.value = src.value
+                        if src.has_style:
+                            helper_copy_cell_format(src, dst)
+                    next_row += 1
+                if i % 20 == 0:
+                    progress = start_percent + (i / max(total_data_rows, 1)) * (end_percent - start_percent)
+                    update_progress_step1(min(progress, end_percent), f"Đang xử lý {title}...")
             
             helper_calculate_column_width(ws_dst)
 
-        update_progress(60, "Đang tạo sheet 'Nhóm 1'...")
-        create_sheet_from_df("Nhóm 1", df_nhom1)
+        copy_rows_step1("Nhóm 1", lambda r_idx: r_idx not in rows_to_color, 40, 70)
+        copy_rows_step1("Nhóm 2", lambda r_idx: r_idx in rows_to_color, 70, 99)
         
-        update_progress(80, "Đang tạo sheet 'Nhóm 2'...")
-        create_sheet_from_df("Nhóm 2", df_nhom2)
-
-        update_progress(100, "Hoàn tất Bước 1!")
+        update_progress_step1(100, "Hoàn tất Bước 1!")
         return wb
 
     except Exception as e:
         st.error(f"Lỗi nghiêm trọng (Bước 1): {e}")
-        logging.error(f"Lỗi Bước 1: {e}", exc_info=True)
+        logging.error(f"Lỗi Bước 1: {e}")
         return None
 
 def run_step_2_clear_fill(wb, master_progress_bar, master_status_label, base_percent, step_budget):
@@ -350,56 +359,65 @@ def run_step_2_clear_fill(wb, master_progress_bar, master_status_label, base_per
         return None
 
 def run_step_3_split_by_color(wb, master_progress_bar, master_status_label, base_percent, step_budget):
-    """
-    Bước 3: Tách sheet 'Nhóm 2' thành 'Nhóm 2_TC' (không màu) và 'Nhóm 2_GDC' (có màu).
-    """
     TARGET_SHEET = "Nhóm 2"
     
-    def update_progress(local_percent, step_text=""):
-        master_status_label.info(f"Bước 3: {step_text} ({local_percent:.0f}%)")
-        master_percent = base_percent + (local_percent / 100) * step_budget
-        master_progress_bar.progress(int(master_percent))
-
     try:
+        logging.info(f"Bước 3: Bắt đầu xử lý sheet {TARGET_SHEET}")
         if TARGET_SHEET not in wb.sheetnames:
-            st.info(f"Thông báo (Bước 3): Không tìm thấy sheet '{TARGET_SHEET}', bỏ qua bước này.")
-            update_progress(100, f"Bỏ qua (không có sheet {TARGET_SHEET})")
-            return wb
-            
-        ws_src = wb
-        
-        update_progress(0, "Đang đọc dữ liệu và màu sắc...")
-        # OPTIMIZATION: Đọc dữ liệu vào DataFrame, đồng thời xây dựng một mask màu.
-        data = list(ws_src.values)
-        df = pd.DataFrame(data[4:], columns=data[1]) # Header ở hàng 4 (index 3)
-        
-        has_bg_mask =
-        
-        update_progress(30, "Đang tách dữ liệu trong bộ nhớ...")
-        # Áp dụng mask để tách DataFrame
-        df_tc = df[[not has_bg for has_bg in has_bg_mask]] # Nhóm 2_TC (không màu)
-        df_gdc = df[has_bg_mask] # Nhóm 2_GDC (có màu)
+            st.error(f"Lỗi (Bước 3): Không tìm thấy sheet '{TARGET_SHEET}' để xử lý.")
+            return None
+        ws_src = wb[TARGET_SHEET]
+        last_row = ws_src.max_row
+        last_col = ws_src.max_column
 
-        def create_sheet_from_df(title, dataframe):
+        def copy_rows_step3(condition_fn, title):
             if title in wb.sheetnames:
                 wb.remove(wb[title])
             ws_dst = wb.create_sheet(title)
-            helper_copy_rows_with_style(ws_src, ws_dst, max_row=4)
-            for r in dataframe_to_rows(dataframe, index=False, header=False):
-                ws_dst.append(r)
+            for row in range(1, 5):
+                for col in range(1, last_col + 1):
+                    cell_src = ws_src.cell(row=row, column=col)
+                    cell_dst = ws_dst.cell(row=row, column=col)
+                    cell_dst.value = cell_src.value
+                    if cell_src.has_style:
+                        helper_copy_cell_format(cell_src, cell_dst)
+            next_row = 5
+            for row in range(5, last_row + 1):
+                cell = ws_src.cell(row=row, column=1)
+                if condition_fn(cell):
+                    for col in range(1, last_col + 1):
+                        cell_src = ws_src.cell(row=row, column=col)
+                        cell_dst = ws_dst.cell(row=next_row, column=col)
+                        cell_dst.value = cell_src.value
+                        if cell_src.has_style:
+                            helper_copy_cell_format(cell_src, cell_dst)
+                    next_row += 1
+            
             helper_calculate_column_width(ws_dst)
 
-        update_progress(50, "Đang tạo sheet 'Nhóm 2_TC'...")
-        create_sheet_from_df("Nhóm 2_TC", df_tc)
-        
-        update_progress(75, "Đang tạo sheet 'Nhóm 2_GDC'...")
-        create_sheet_from_df("Nhóm 2_GDC", df_gdc)
+        total_steps = 2 * (last_row - 4)
+        processed = 0
 
-        update_progress(100, "Hoàn tất Bước 3!")
+        def update_progress_step3(add, message):
+            nonlocal processed
+            processed += add
+            local_percent = (processed / max(total_steps, 1)) * 100
+            master_status_label.info(f"Bước 3: {message} ({local_percent:.0f}%)")
+            master_percent = base_percent + (local_percent / 100) * step_budget
+            master_progress_bar.progress(int(master_percent))
+
+        copy_rows_step3(lambda c: not helper_cell_has_bg(c), "Nhóm 2_TC")
+        update_progress_step3(last_row - 4, "Đang xuất Nhóm 2_TC (không màu)...")
+
+        copy_rows_step3(lambda c: helper_cell_has_bg(c), "Nhóm 2_GDC")
+        update_progress_step3(last_row - 4, "Đang xuất Nhóm 2_GDC (có màu)...")
+
+        master_progress_bar.progress(int(base_percent + step_budget))
+        logging.info("Bước 3: Hoàn tất, đã tạo 'Nhóm 2_TC' và 'Nhóm 2_GDC'.")
         return wb
     except Exception as e:
         st.error(f"Lỗi nghiêm trọng (Bước 3): {e}")
-        logging.error(f"Lỗi Bước 3: {e}", exc_info=True)
+        logging.error(f"Lỗi Bước 3: {e}")
         return None
 
 def run_step_4_split_files(
