@@ -547,7 +547,10 @@ with st.sidebar:
 st.title("Công cụ Hỗ trợ Xử lý Dữ liệu Đất đai")
 st.markdown("---")
 
-tab1, tab2 = st.tabs()
+tab1, tab2 = st.tabs([
+    " CÔNG CỤ 1: SAO CHÉP & ÁNH XẠ CỘT ",
+    " CÔNG CỤ 2: LÀM SẠCH & TÁCH FILE THEO THÔN "
+])
 
 # --- GIAO DIỆN CÔNG CỤ 1 ---
 with tab1:
