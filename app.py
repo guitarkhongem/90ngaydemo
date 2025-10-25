@@ -25,6 +25,8 @@ TOOL1_COLUMN_MAPPING: Dict[str, str] = {
     'F': 'I', 'G': 'X', 'I': 'K', 'N': 'AY'
 }
 TOOL1_START_ROW_DESTINATION: int = 7
+# Tên file đích cố định
+TOOL1_DESTINATION_FILE_PATH: str = "PL3-01-CV2071-QLĐĐ (Cap nhat).xlsx" 
 
 # --- CẤU HÌNH CÔNG CỤ 2: LÀM SẠCH & TÁCH FILE ---
 STEP1_CHECK_COLS: List[str] = ["D", "E", "F", "I", "J", "L", "M", "R", "S", "T", "U"]
@@ -151,7 +153,22 @@ def get_sheet_names_from_buffer(file_buffer: io.BytesIO) -> List[str]:
         return sheet_names
     except Exception as e:
         st.error(f"Không thể đọc sheet từ file: {e}")
-        return
+        return []
+
+def get_sheet_names_from_path(file_path: str) -> Optional[List[str]]:
+    """Đọc tên các sheet từ một file Excel trên ổ đĩa."""
+    if not os.path.exists(file_path):
+        st.error(f"Lỗi: Không tìm thấy file đích '{file_path}'.")
+        st.warning(f"Vui lòng đảm bảo file '{file_path}' nằm cùng thư mục với file app.py.")
+        return None
+    try:
+        wb = load_workbook(file_path, read_only=True)
+        sheet_names = wb.sheetnames
+        wb.close()
+        return sheet_names
+    except Exception as e:
+        st.error(f"Không thể đọc sheet từ file '{file_path}': {e}")
+        return None
 
 def tool1_transform_and_copy(source_buffer, source_sheet, dest_buffer, dest_sheet, progress_bar, status_label):
     """
@@ -331,7 +348,7 @@ def run_step_2_clear_fill(wb, master_progress_bar, master_status_label, base_per
             update_progress(100, f"Bỏ qua (không có sheet {TARGET_SHEET})")
             return wb
             
-        ws = wb
+        ws = wb[TARGET_SHEET] # Thay đổi ở đây
         last_row = ws.max_row
         rows_changed = 0
         
@@ -339,8 +356,11 @@ def run_step_2_clear_fill(wb, master_progress_bar, master_status_label, base_per
         # Thao tác định dạng vẫn cần lặp qua từng ô, khó tối ưu hơn.
         # Tuy nhiên, số lượng hàng trong 'Nhóm 2' thường ít hơn nên chấp nhận được.
         total_rows = last_row - STEP2_START_ROW + 1
+        
+        col_g_index = column_index_from_string(STEP2_TARGET_COL) # Lấy index cột G
+
         for i, row_idx in enumerate(range(STEP2_START_ROW, last_row + 1)):
-            cell_g = ws
+            cell_g = ws.cell(row=row_idx, column=col_g_index) # Truy cập ô G
             is_blank = (cell_g.value is None or str(cell_g.value).strip() == "")
             if not is_blank:
                 for cell_in_row in ws[row_idx]:
@@ -460,7 +480,7 @@ def run_step_4_split_files(
             zip_buffer.seek(0)
             return zip_buffer
 
-        tonghop_ws = wb_template
+        tonghop_ws = wb_template[TEMPLATE_SHEET] # Sửa ở đây, lấy sheet TongHop
         
         # OPTIMIZATION: Đọc dữ liệu một lần, header từ hàng 4 (index 3)
         step4_data_buffer.seek(0)
@@ -480,7 +500,7 @@ def run_step_4_split_files(
             return None
         
         # OPTIMIZATION: Sử dụng groupby của Pandas, là cách làm hiệu quả và chuẩn nhất.
-        df = df.apply(helper_normalize_value).fillna("BLANK")
+        df[FILTER_COLUMN] = df[FILTER_COLUMN].apply(helper_normalize_value).fillna("BLANK") # Sửa ở đây
         grouped = df.groupby(FILTER_COLUMN)
         
         total_groups = len(grouped)
@@ -503,8 +523,11 @@ def run_step_4_split_files(
                 
                 helper_copy_rows_with_style(tonghop_ws, new_ws, max_row=3)
                 
-                for r in dataframe_to_rows(group_df, index=False, header=True): # Ghi cả header
-                    new_ws.append(r)
+                # Ghi dữ liệu, bắt đầu từ hàng 4 (header)
+                for r_idx, r in enumerate(dataframe_to_rows(group_df, index=False, header=True), start=4): 
+                    for c_idx, value in enumerate(r, start=1):
+                         # Bỏ qua cột STT (cột A) khi ghi từ DataFrame
+                        new_ws.cell(row=r_idx, column=c_idx, value=value)
                 
                 helper_group_columns_openpyxl(new_ws)
                 helper_calculate_column_width(new_ws)
@@ -539,7 +562,7 @@ st.set_page_config(page_title="Công cụ Dữ liệu Đất đai", layout="wide
 # --- SIDEBAR ---
 with st.sidebar:
     st.title("Hướng dẫn sử dụng")
-    st.info("**Công cụ 1: Sao chép & Ánh xạ Cột**\n\n- Tải lên file Nguồn và file Đích.\n- Chọn sheet tương ứng.\n- Công cụ sẽ sao chép dữ liệu từ nguồn sang đích theo cấu hình định sẵn.")
+    st.info("**Công cụ 1: Sao chép & Ánh xạ Cột**\n\n- Tải lên file Nguồn.\n- File đích được cố định là `PL3-01-CV2071-QLĐĐ (Cap nhat).xlsx`.\n- Chọn sheet tương ứng.\n- Công cụ sẽ sao chép dữ liệu từ nguồn sang đích.")
     st.info("**Công cụ 2: Làm sạch & Tách file**\n\n- Tải file Excel gốc, chọn sheet.\n- Công cụ sẽ tự động chạy toàn bộ quy trình làm sạch, phân loại và tách file.\n- Kết quả trả về là một file ZIP chứa file tổng đã xử lý và các file con đã được tách.")
     st.success("Phát triển bởi: **Trường Sinh**\n\nSĐT: **0917.750.555**")
 
@@ -554,48 +577,68 @@ tab1, tab2 = st.tabs([
 
 # --- GIAO DIỆN CÔNG CỤ 1 ---
 with tab1:
-    st.header("Chuyển đổi và sao chép dữ liệu giữa hai file Excel")
+    st.header("Chuyển đổi và sao chép dữ liệu vào file PL3 Cố định")
     
     col1, col2 = st.columns(2)
+    
+    # CỘT 1: NGUỒN (Không đổi)
     with col1:
         source_file = st.file_uploader("1. Tải lên File Nguồn (lấy dữ liệu)", type=["xlsx", "xls"], key="tool1_source")
         if source_file:
             source_sheets = get_sheet_names_from_buffer(source_file)
-            selected_source_sheet = st.selectbox("2. Chọn Sheet Nguồn:", source_sheets, key="tool1_source_sheet")
+            if source_sheets:
+                selected_source_sheet = st.selectbox("2. Chọn Sheet Nguồn:", source_sheets, key="tool1_source_sheet")
     
+    # CỘT 2: ĐÍCH (Đã thay đổi)
     with col2:
-        dest_file = st.file_uploader("3. Tải lên File Đích (nhận dữ liệu)", type=["xlsx", "xls"], key="tool1_dest")
-        if dest_file:
-            dest_sheets = get_sheet_names_from_buffer(dest_file)
+        st.markdown(f"**3. File Đích (cố định):**")
+        st.info(f"File đích đã được chỉ định là:\n`{TOOL1_DESTINATION_FILE_PATH}`")
+        
+        # Tự động đọc sheet từ file cố định
+        dest_sheets = get_sheet_names_from_path(TOOL1_DESTINATION_FILE_PATH)
+        if dest_sheets:
             selected_dest_sheet = st.selectbox("4. Chọn Sheet Đích:", dest_sheets, key="tool1_dest_sheet")
+        else:
+            st.error(f"Không thể tải file đích. Đảm bảo file '{TOOL1_DESTINATION_FILE_PATH}' tồn tại cùng thư mục với app.")
 
     st.markdown("---")
     
     if st.button("BẮT ĐẦU SAO CHÉP DỮ LIỆU", type="primary", key="tool1_start"):
-        if source_file and dest_file and 'selected_source_sheet' in locals() and 'selected_dest_sheet' in locals():
+        # Cập nhật điều kiện 'if'
+        if source_file and 'selected_source_sheet' in locals() and 'selected_dest_sheet' in locals() and dest_sheets:
             progress_bar_1 = st.progress(0)
             status_text_1 = st.empty()
             
-            # Đảm bảo buffer có thể đọc lại được
             source_buffer = io.BytesIO(source_file.getvalue())
-            dest_buffer = io.BytesIO(dest_file.getvalue())
             
-            result_buffer = tool1_transform_and_copy(
-                source_buffer, selected_source_sheet,
-                dest_buffer, selected_dest_sheet,
-                progress_bar_1, status_text_1
-            )
+            # Tải file đích từ đường dẫn vào buffer
+            dest_buffer = None
+            try:
+                status_text_1.info(f"Đang đọc file đích cố định: {TOOL1_DESTINATION_FILE_PATH}...")
+                with open(TOOL1_DESTINATION_FILE_PATH, "rb") as f:
+                    dest_buffer = io.BytesIO(f.read())
+            except Exception as e:
+                st.error(f"Lỗi nghiêm trọng khi đọc file đích '{TOOL1_DESTINATION_FILE_PATH}': {e}")
+                # Dừng ở đây
             
-            if result_buffer:
-                status_text_1.success("✅ HOÀN TẤT! Vui lòng tải file đích đã được cập nhật về.")
-                st.download_button(
-                    label="📥 Tải về File Đích đã cập nhật",
-                    data=result_buffer,
-                    file_name=f"[Updated]_{dest_file.name}",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            if dest_buffer: # Chỉ chạy nếu đọc file đích thành công
+                result_buffer = tool1_transform_and_copy(
+                    source_buffer, selected_source_sheet,
+                    dest_buffer, selected_dest_sheet,
+                    progress_bar_1, status_text_1
                 )
+                
+                if result_buffer:
+                    status_text_1.success("✅ HOÀN TẤT! Vui lòng tải file đích đã được cập nhật về.")
+                    st.download_button(
+                        label="📥 Tải về File Đích đã cập nhật",
+                        data=result_buffer,
+                        # Cập nhật tên file download
+                        file_name=f"[Updated]_{TOOL1_DESTINATION_FILE_PATH}", 
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
         else:
-            st.warning("Vui lòng tải lên cả hai file và chọn sheet tương ứng.")
+            st.warning("Vui lòng tải lên File Nguồn và đảm bảo File Đích đã được cấu hình đúng.")
 
 # --- GIAO DIỆN CÔNG CỤ 2 ---
 with tab2:
@@ -640,8 +683,8 @@ with tab2:
                 
                 # Gọi hàm Bước 4
                 zip_buffer = run_step_4_split_files(
-                    final_wb_buffer,          # Buffer này được dùng để đọc
-                    final_wb_buffer,          # và cũng được dùng để lưu vào zip
+                    final_wb_buffer,       # Buffer này được dùng để đọc
+                    final_wb_buffer,       # và cũng được dùng để lưu vào zip
                     main_processed_filename,
                     progress_bar_2, 
                     status_text_2, 
@@ -666,4 +709,3 @@ with tab2:
         except Exception as e:
             st.error(f"Lỗi không xác định trong quy trình: {e}")
             logging.error(f"Lỗi Streamlit Workflow: {e}", exc_info=True)
-
