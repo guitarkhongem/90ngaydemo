@@ -180,11 +180,37 @@ def tool1_transform_and_copy(source_buffer, source_sheet, dest_buffer, dest_shee
     try:
         # 1. Đọc dữ liệu nguồn
         status_label.info("Đang đọc dữ liệu từ file nguồn...")
-        source_cols_letters = list(TOOL1_COLUMN_MAPPING.keys())
+        source_cols_letters_list = list(TOOL1_COLUMN_MAPPING.keys())
+        
+        # --- SỬA ĐỔI BẮT ĐẦU ---
+        # Chuyển list ['A', 'B', 'C'] thành string "A,B,C"
+        # Điều này chỉ thị cho pandas đọc theo *vị trí chữ cái* của cột,
+        # thay vì tìm *tên cột* là "A", "B", "C" trong header.
+        source_cols_str = ",".join(source_cols_letters_list)
         
         # OPTIMIZATION: Sử dụng pd.read_excel với engine='openpyxl' để tương thích tốt hơn
-        df_source = pd.read_excel(source_buffer, sheet_name=source_sheet, header=None, skiprows=2, usecols=source_cols_letters, engine='openpyxl')
-        df_source.columns = source_cols_letters # Gán lại tên cột sau khi đọc
+        df_source = pd.read_excel(source_buffer,
+                                  sheet_name=source_sheet,
+                                  header=None,
+                                  skiprows=2,
+                                  usecols=source_cols_str, # <--- SỬ DỤNG BIẾN MỚI Ở ĐÂY
+                                  engine='openpyxl')
+        
+        # Khi đọc với header=None, pandas trả về cột với index 0, 1, 2...
+        # Ta cần gán lại tên cột 'A', 'B', 'C'... cho chúng.
+        # Sắp xếp lại danh sách cột để đảm bảo thứ tự
+        sorted_source_cols = sorted(source_cols_letters_list, key=column_index_from_string)
+
+        # Kiểm tra xem số cột đọc được có khớp với số cột mong đợi không
+        if len(df_source.columns) != len(sorted_source_cols):
+            st.error(f"Lỗi đọc cột: Đọc được {len(df_source.columns)} cột, nhưng mong đợi {len(sorted_source_cols)} cột.")
+            logging.error(f"Lỗi mapping cột: Đã đọc {df_source.columns} nhưng key là {sorted_source_cols}")
+            return None
+
+        # Gán tên cột (A, B, C...) cho dữ liệu (0, 1, 2...)
+        df_source.columns = sorted_source_cols
+        # --- SỬA ĐỔI KẾT THÚC ---
+
         df_source_renamed = df_source.rename(columns=TOOL1_COLUMN_MAPPING)
         progress_bar.progress(20)
 
