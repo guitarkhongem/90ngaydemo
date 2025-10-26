@@ -547,9 +547,7 @@ def run_step_4_split_files(step4_data_buffer, main_processed_buffer, main_proces
             
             master_status_label.info("Bước 4: Đang nén file ZIP...")
             zip_buffer = io.BytesIO()
-            with zipfile.ZipFileევ
-
-System: File(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_f:
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_f:
                 for root, _, files in os.walk(tmpdir):
                     for file in files:
                         zip_f.write(os.path.join(root, file), arcname=file)
