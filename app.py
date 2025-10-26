@@ -4,6 +4,7 @@ import numpy as np
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import PatternFill, Border, Side
 from openpyxl.utils import get_column_letter, column_index_from_string
+from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.utils.dataframe import dataframe_to_rows
 import os
 import re
@@ -15,8 +16,11 @@ import tempfile
 from typing import List, Dict, Set, Optional, Any
 
 # --- CẤU HÌNH LOGGING ---
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    filename='full_workflow_streamlit.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 # --- CẤU HÌNH CÔNG CỤ 1: SAO CHÉP & ÁNH XẠ ---
 TOOL1_COLUMN_MAPPING: Dict[str, str] = {
@@ -28,13 +32,120 @@ TOOL1_TEMPLATE_FILE_PATH: str = "templates/PL3-01-CV2071-QLĐĐ (Cap nhat).xlsx"
 TOOL1_DESTINATION_FILE_NAME: str = "PL3-01-CV2071-QLĐĐ (Cap nhat).xlsx"
 
 # --- CẤU HÌNH CÔNG CỤ 2: LÀM SẠCH & TÁCH FILE ---
-# (Giữ nguyên như code gốc)
+STEP1_CHECK_COLS: List[str] = ["D", "E", "F", "I", "J", "L", "M", "R", "S", "T", "U"]
+STEP1_START_ROW: int = 5
+STEP1_YELLOW_FILL = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
+STEP1_EMPTY_FILL = PatternFill(fill_type=None)
+STEP2_TARGET_COL: str = "G"
+STEP2_START_ROW: int = 5
+STEP2_EMPTY_FILL = PatternFill(fill_type=None)
 
-# --- CÁC HÀM HELPER CHUNG ---
-# (Giữ nguyên các hàm helper như code gốc)
+# --- CÁC HÀM HELPER ---
+def helper_copy_cell_format(src_cell, tgt_cell):
+    """Sao chép định dạng từ cell nguồn sang cell đích."""
+    if src_cell.has_style:
+        tgt_cell.font = copy(src_cell.font)
+        tgt_cell.border = copy(src_cell.border)
+        tgt_cell.fill = copy(src_cell.fill)
+        tgt_cell.number_format = copy(src_cell.number_format)
+        tgt_cell.protection = copy(src_cell.protection)
+        tgt_cell.alignment = copy(src_cell.alignment)
 
+def helper_copy_rows_with_style(src_ws, tgt_ws, max_row=3):
+    """Copy N hàng đầu tiên (giá trị + định dạng + merge + độ rộng cột)."""
+    for row_idx in range(1, max_row + 1):
+        for col_idx, src_cell in enumerate(src_ws[row_idx], start=1):
+            tgt_cell = tgt_ws.cell(row=row_idx, column=col_idx, value=src_cell.value)
+            helper_copy_cell_format(src_cell, tgt_cell)
+
+    for col_letter, dim in src_ws.column_dimensions.items():
+        if dim.width:
+            tgt_ws.column_dimensions[col_letter].width = dim.width
+
+    for merged_range in src_ws.merged_cells.ranges:
+        if merged_range.min_row <= max_row:
+            tgt_ws.merge_cells(str(merged_range))
+
+def helper_normalize_value(val: Any) -> Any:
+    """Chuẩn hóa giá trị: chuyển về str, loại bỏ khoảng trắng thừa, xử lý NaN."""
+    if pd.isna(val) or val is None:
+        return np.nan
+    str_val = str(val).strip()
+    str_val = re.sub(r'\s+', ' ', str_val)
+    return str_val.lower() if str_val else np.nan
+
+def helper_group_columns_openpyxl(ws):
+    """Group các cột bằng openpyxl (An toàn cho môi trường online)."""
+    try:
+        for col in ws.column_dimensions:
+            dim = ws.column_dimensions[col]
+            if dim.outline_level > 0:
+                dim.outline_level = 0
+                dim.collapsed = False
+        
+        ranges_to_group = [("B", "C"), ("G", "H"), ("K", "K"), ("N", "Q"), ("W", "AY")]
+        for start_col, end_col in ranges_to_group:
+            start_idx = column_index_from_string(start_col)
+            end_idx = column_index_from_string(end_col)
+            for c_idx in range(start_idx, end_idx + 1):
+                col_letter = get_column_letter(c_idx)
+                if col_letter in ws.column_dimensions:
+                    ws.column_dimensions[col_letter].outline_level = 1
+        logging.info("✅ Group cột thành công bằng openpyxl")
+    except Exception as e:
+        logging.warning(f"⚠️ Không thể group cột bằng openpyxl: {e}")
+
+def helper_calculate_column_width(ws):
+    """Tính độ rộng cột thủ công cho openpyxl."""
+    for col in range(1, ws.max_column + 1):
+        max_length = 0
+        column_letter = get_column_letter(col)
+        for cell in ws[column_letter]:
+            try:
+                if cell.value:
+                    cell_len = len(str(cell.value))
+                    max_length = max(max_length, cell_len)
+            except:
+                pass
+        adjusted_width = min(max(max_length + 2, 8), 60)
+        ws.column_dimensions[column_letter].width = adjusted_width
+
+def helper_get_safe_filepath(output_folder: str, name: str) -> str:
+    """Tạo tên tệp an toàn, tránh ghi đè."""
+    counter = 1
+    safe_path = os.path.join(output_folder, f"{name}.xlsx")
+    while os.path.exists(safe_path):
+        safe_path = os.path.join(output_folder, f"{name}_{counter}.xlsx")
+        counter += 1
+    return safe_path
+
+def helper_cell_has_bg(c):
+    """Kiểm tra cell có màu nền hay không."""
+    try:
+        fg = getattr(c.fill, 'fgColor', None)
+        if fg is None:
+            return False
+        rgb = getattr(fg, 'rgb', None)
+        if rgb:
+            ru = str(rgb).upper()
+            if ru in ('00000000', '00000000FF', 'FFFFFFFF', '00FFFFFF', 'FF000000'):
+                return False
+            if ru[-6:] in ('000000', 'FFFFFF'):
+                return False
+            return True
+        indexed = getattr(fg, 'indexed', None)
+        if indexed is not None:
+            return indexed != 0
+        theme = getattr(fg, 'theme', None)
+        if theme is not None:
+            return True
+    except Exception:
+        return False
+    return False
+
+# --- CÁC HÀM CHO CÔNG CỤ 1 ---
 def get_sheet_names_from_buffer(file_buffer: io.BytesIO) -> List[str]:
-    """Đọc tên các sheet từ một buffer file Excel mà không làm thay đổi vị trí con trỏ."""
+    """Đọc tên các sheet từ một buffer file Excel."""
     try:
         original_position = file_buffer.tell()
         file_buffer.seek(0)
@@ -66,24 +177,26 @@ def tool1_transform_and_copy(source_buffer, source_sheet, dest_sheet, progress_b
     try:
         # 1. Đọc dữ liệu nguồn
         status_label.info("Đang đọc dữ liệu từ file nguồn...")
-        source_cols_letters_list = list(TOOL1_COLUMN_MAPPING.keys())
+        source_cols_letters_list = list(TOOL1_COLUMN_MAPPING.keys())  # ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'I', 'N']
         source_cols_str = ",".join(source_cols_letters_list)
         
-        df_source = pd.read_excel(source_buffer,
-                                 sheet_name=source_sheet,
-                                 header=None,
-                                 skiprows=2,
-                                 usecols=source_cols_str,
-                                 engine='openpyxl')
+        df_source = pd.read_excel(
+            source_buffer,
+            sheet_name=source_sheet,
+            header=None,
+            skiprows=2,
+            usecols=source_cols_str,
+            engine='openpyxl'
+        )
         
-        sorted_source_cols = sorted(source_cols_letters_list, key=column_index_from_string)
-        if len(df_source.columns) != len(sorted_source_cols):
-            st.error(f"Lỗi đọc cột: Đọc được {len(df_source.columns)} cột, nhưng mong đợi {len(sorted_source_cols)} cột.")
-            logging.error(f"Lỗi mapping cột: Đã đọc {df_source.columns} nhưng key là {sorted_source_cols}")
+        # Kiểm tra số cột đọc được
+        if len(df_source.columns) != len(source_cols_letters_list):
+            st.error(f"Lỗi đọc cột: Đọc được {len(df_source.columns)} cột, nhưng mong đợi {len(source_cols_letters_list)} cột ({source_cols_str}).")
+            logging.error(f"Lỗi đọc cột: Đã đọc {len(df_source.columns)} cột, mong đợi {source_cols_letters_list}")
             return None
 
-        df_source.columns = sorted_source_cols 
-        df_source_renamed = df_source.rename(columns=TOOL1_COLUMN_MAPPING)
+        # Gán tên cột theo thứ tự trong TOOL1_COLUMN_MAPPING
+        df_source.columns = source_cols_letters_list
         progress_bar.progress(20)
 
         # 2. Mở file mẫu
@@ -99,21 +212,29 @@ def tool1_transform_and_copy(source_buffer, source_sheet, dest_sheet, progress_b
             wb_dest.close()
             return None
         ws_dest = wb_dest[dest_sheet]
+
+        # Kiểm tra cột đích có tồn tại
+        max_col = ws_dest.max_column
+        for dest_col in TOOL1_COLUMN_MAPPING.values():
+            if column_index_from_string(dest_col) > max_col:
+                st.error(f"Lỗi: Cột đích '{dest_col}' không tồn tại trong sheet đích.")
+                logging.error(f"Cột đích '{dest_col}' không tồn tại trong sheet đích")
+                wb_dest.close()
+                return None
         progress_bar.progress(40)
 
         # 3. Ghi dữ liệu
         status_label.info("Đang sao chép dữ liệu...")
         total_rows_to_write = len(df_source)
         
-        for i, (source_col_letter_in_map, dest_col_letter) in enumerate(TOOL1_COLUMN_MAPPING.items()):
-            col_index_dest = column_index_from_string(dest_col_letter)
-            data_series = df_source_renamed[dest_col_letter]
-            
+        for source_col, dest_col in TOOL1_COLUMN_MAPPING.items():
+            col_index_dest = column_index_from_string(dest_col)
+            data_series = df_source[source_col]  # Lấy dữ liệu từ cột nguồn
             for j, value in enumerate(data_series, start=TOOL1_START_ROW_DESTINATION):
                 cell_value = None if pd.isna(value) else value
                 ws_dest.cell(row=j, column=col_index_dest, value=cell_value)
-            
-            progress_bar.progress(40 + int((i + 1) / len(TOOL1_COLUMN_MAPPING) * 40))
+        
+        progress_bar.progress(80)
 
         # 4. Kẻ viền cho vùng dữ liệu thực tế (A → AX)
         status_label.info("Đang kẻ viền cho vùng dữ liệu mới...")
@@ -147,83 +268,6 @@ def tool1_transform_and_copy(source_buffer, source_sheet, dest_sheet, progress_b
         logging.error(f"Lỗi Công cụ 1: {e}", exc_info=True)
         return None
 
-# --- GIAO DIỆN STREAMLIT CHÍNH ---
-st.set_page_config(page_title="TSCopyRight", layout="wide", page_icon="🚀")
-
-# --- SIDEBAR ---
-# (Giữ nguyên như code trước)
-
-# --- MAIN PAGE ---
-st.title("Chiến Dịch Xây Dựng Cơ Sở Dữ Liệu Đất Đai")
-st.header("Bộ Công cụ Hỗ trợ Dữ liệu")
-st.markdown("---")
-
-# --- TẠO 2 TAB CHO 2 CÔNG CỤ ---
-tab1, tab2 = st.tabs([
-    "Công cụ 1: Sao chép & Ánh xạ Dữ liệu",
-    "Công cụ 2: Làm sạch & Tách file (Quy trình chính)"
-])
-
-# --- GIAO DIỆN CHO CÔNG CỤ 1 ---
-with tab1:
-    st.subheader("Sao chép dữ liệu từ File Nguồn sang File Mẫu")
-    
-    st.markdown("### Bước 1: Tải lên File Nguồn (File chứa dữ liệu)")
-    source_file = st.file_uploader("Chọn File Nguồn (.xlsx, .xlsm)", type=["xlsx", "xlsm"], key="tool1_source")
-    
-    source_sheet = None
-    dest_sheet = None
-
-    col1, col2 = st.columns(2)
-    with col1:
-        if source_file:
-            source_sheets = get_sheet_names_from_buffer(source_file)
-            source_sheet = st.selectbox("Chọn Sheet Nguồn (để đọc):", source_sheets, key="tool1_source_sheet")
-    
-    with col2:
-        try:
-            dest_sheets = get_sheet_names_from_path(TOOL1_TEMPLATE_FILE_PATH)
-            dest_sheet = st.selectbox("Chọn Sheet Đích (để ghi):", dest_sheets, key="tool1_dest_sheet")
-        except Exception as e:
-            st.error(f"Không thể đọc file mẫu tại '{TOOL1_TEMPLATE_FILE_PATH}'. Vui lòng kiểm tra!")
-            logging.error(f"Lỗi đọc file mẫu: {e}")
-            dest_sheet = None
-
-    st.markdown("### Bước 2: Xác nhận")
-    start_tool1 = st.button("Bắt đầu Sao chép & Ánh xạ", key="tool1_start")
-
-    if start_tool1:
-        if not source_file or not source_sheet or not dest_sheet:
-            st.error("Vui lòng tải lên file nguồn và chọn cả hai sheet.")
-        else:
-            progress_bar_tool1 = st.progress(0)
-            status_label_tool1 = st.empty()
-            
-            try:
-                source_file.seek(0)
-                result_buffer = tool1_transform_and_copy(
-                    source_file, source_sheet, 
-                    dest_sheet, 
-                    progress_bar_tool1, status_label_tool1
-                )
-                
-                if result_buffer:
-                    status_label_tool1.success("✅ HOÀN TẤT!")
-                    st.download_button(
-                        label="Tải về File Đích đã cập nhật",
-                        data=result_buffer,
-                        file_name=TOOL1_DESTINATION_FILE_NAME,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                else:
-                    status_label_tool1.error("Xử lý thất bại. Vui lòng kiểm tra log.")
-            
-            except Exception as e:
-                st.error(f"Lỗi nghiêm trọng Công cụ 1: {e}")
-                logging.error(f"Lỗi Streamlit Tool 1: {e}", exc_info=True)
-
-# --- GIAO DIỆN CHO CÔNG CỤ 2 ---
-# (Giữ nguyên như code trước)
 # --- CÁC HÀM CHO CÔNG CỤ 2 ---
 def run_step_1_process(wb, sheet_name, master_progress_bar, master_status_label, base_percent, step_budget):
     """Bước 1: Làm sạch và phân loại dữ liệu, tạo Nhóm 1 và Nhóm 2."""
@@ -515,7 +559,7 @@ def run_step_4_split_files(step4_data_buffer, main_processed_buffer, main_proces
         logging.error(f"Lỗi Bước 4: {e}")
         return None
     finally:
-        if wb_openpyxl:
+        if 'wb_openpyxl' in locals():
             try:
                 wb_openpyxl.close()
             except:
