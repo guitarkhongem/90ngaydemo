@@ -190,7 +190,7 @@ with tab1:
             dest_sheet = None
 
     st.markdown("### Bước 2: Xác nhận")
-    start_tool1 = st.button("Bắt đầu Sao chép & Ánh xạ", key="tool1_start")
+    start_tool1 = st.button("Bắt đầu Sao chép B01", key="tool1_start")
 
     if start_tool1:
         if not source_file or not source_sheet or not dest_sheet:
