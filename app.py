@@ -213,14 +213,15 @@ def tool1_transform_and_copy(source_buffer, source_sheet, dest_sheet, progress_b
             return None
         ws_dest = wb_dest[dest_sheet]
 
-        # Kiểm tra cột đích có tồn tại
-        max_col = ws_dest.max_column
-        for dest_col in TOOL1_COLUMN_MAPPING.values():
-            if column_index_from_string(dest_col) > max_col:
-                st.error(f"Lỗi: Cột đích '{dest_col}' không tồn tại trong sheet đích.")
-                logging.error(f"Cột đích '{dest_col}' không tồn tại trong sheet đích")
-                wb_dest.close()
-                return None
+        # Kiểm tra và mở rộng số cột nếu cần
+        max_required_col = max(column_index_from_string(col) for col in TOOL1_COLUMN_MAPPING.values())
+        if ws_dest.max_column < max_required_col:
+            status_label.info(f"Sheet đích chỉ có {ws_dest.max_column} cột, đang mở rộng đến {max_required_col} cột...")
+            for col_idx in range(ws_dest.max_column + 1, max_required_col + 1):
+                col_letter = get_column_letter(col_idx)
+                ws_dest[f"{col_letter}1"] = ""  # Thêm ô trống để mở rộng cột
+            ws_dest.max_column = max_required_col
+            logging.info(f"Đã mở rộng sheet đích lên {max_required_col} cột")
         progress_bar.progress(40)
 
         # 3. Ghi dữ liệu
