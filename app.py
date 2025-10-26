@@ -177,24 +177,26 @@ def tool1_transform_and_copy(source_buffer, source_sheet, dest_sheet, progress_b
     try:
         # 1. Đọc dữ liệu nguồn
         status_label.info("Đang đọc dữ liệu từ file nguồn...")
-        source_cols_letters_list = list(TOOL1_COLUMN_MAPPING.keys())
+        source_cols_letters_list = list(TOOL1_COLUMN_MAPPING.keys())  # ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'I', 'N']
         source_cols_str = ",".join(source_cols_letters_list)
         
-        df_source = pd.read_excel(source_buffer,
-                                 sheet_name=source_sheet,
-                                 header=None,
-                                 skiprows=2,
-                                 usecols=source_cols_str,
-                                 engine='openpyxl')
+        df_source = pd.read_excel(
+            source_buffer,
+            sheet_name=source_sheet,
+            header=None,
+            skiprows=2,
+            usecols=source_cols_str,
+            engine='openpyxl'
+        )
         
-        sorted_source_cols = sorted(source_cols_letters_list, key=column_index_from_string)
-        if len(df_source.columns) != len(sorted_source_cols):
-            st.error(f"Lỗi đọc cột: Đọc được {len(df_source.columns)} cột, nhưng mong đợi {len(sorted_source_cols)} cột.")
-            logging.error(f"Lỗi mapping cột: Đã đọc {df_source.columns} nhưng key là {sorted_source_cols}")
+        # Kiểm tra số cột đọc được
+        if len(df_source.columns) != len(source_cols_letters_list):
+            st.error(f"Lỗi đọc cột: Đọc được {len(df_source.columns)} cột, nhưng mong đợi {len(source_cols_letters_list)} cột ({source_cols_str}).")
+            logging.error(f"Lỗi đọc cột: Đã đọc {len(df_source.columns)} cột, mong đợi {source_cols_letters_list}")
             return None
 
-        df_source.columns = sorted_source_cols 
-        df_source_renamed = df_source.rename(columns=TOOL1_COLUMN_MAPPING)
+        # Gán tên cột theo thứ tự trong TOOL1_COLUMN_MAPPING
+        df_source.columns = source_cols_letters_list
         progress_bar.progress(20)
 
         # 2. Mở file mẫu
@@ -216,15 +218,14 @@ def tool1_transform_and_copy(source_buffer, source_sheet, dest_sheet, progress_b
         status_label.info("Đang sao chép dữ liệu...")
         total_rows_to_write = len(df_source)
         
-        for i, (source_col_letter_in_map, dest_col_letter) in enumerate(TOOL1_COLUMN_MAPPING.items()):
-            col_index_dest = column_index_from_string(dest_col_letter)
-            data_series = df_source_renamed[dest_col_letter]
-            
+        for source_col, dest_col in TOOL1_COLUMN_MAPPING.items():
+            col_index_dest = column_index_from_string(dest_col)
+            data_series = df_source[source_col]  # Lấy dữ liệu từ cột nguồn
             for j, value in enumerate(data_series, start=TOOL1_START_ROW_DESTINATION):
                 cell_value = None if pd.isna(value) else value
                 ws_dest.cell(row=j, column=col_index_dest, value=cell_value)
-            
-            progress_bar.progress(40 + int((i + 1) / len(TOOL1_COLUMN_MAPPING) * 40))
+        
+        progress_bar.progress(80)
 
         # 4. Kẻ viền cho vùng dữ liệu thực tế (A → AX)
         status_label.info("Đang kẻ viền cho vùng dữ liệu mới...")
