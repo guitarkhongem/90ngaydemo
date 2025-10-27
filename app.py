@@ -18,14 +18,14 @@ from typing import List, Dict, Set, Optional, Any
 # --- CẤU HÌNH LOGGING ---
 logging.basicConfig(
     filename='full_workflow_streamlit.log',
-    level=logging.INFO,
+    level=logging.DEBUG,  # Đổi thành DEBUG để log chi tiết hơn
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
 # --- CẤU HÌNH CÔNG CỤ 1: SAO CHÉP & ÁNH XẠ ---
 TOOL1_COLUMN_MAPPING: Dict[str, str] = {
     'A': 'T', 'B': 'U', 'C': 'Y', 'D': 'C', 'E': 'H',
-    'F': 'I', 'G': 'X', 'I': 'K', 'N': 'AY'  # Giữ nguyên AY như code ban đầu
+    'F': 'I', 'G': 'X', 'I': 'K', 'N': 'AY'  # Ánh xạ đúng như yêu cầu
 }
 TOOL1_START_ROW_DESTINATION: int = 7
 TOOL1_TEMPLATE_FILE_PATH: str = "templates/PL3-01-CV2071-QLĐĐ (Cap nhat).xlsx"
@@ -67,12 +67,12 @@ def helper_copy_rows_with_style(src_ws, tgt_ws, max_row=3):
             tgt_ws.merge_cells(str(merged_range))
 
 def helper_normalize_value(val: Any) -> Any:
-    """Chuẩn hóa giá trị: chuyển về str, loại bỏ khoảng trắng thừa, xử lý NaN."""
-    if pd.isna(val) or val is None:
-        return np.nan
+    """Chuẩn hóa giá trị: chuyển NaN, none, <na> thành None, loại bỏ khoảng trắng thừa."""
+    if pd.isna(val) or val is None or str(val).strip().lower() in ['nan', 'none', '<na>']:
+        return None
     str_val = str(val).strip()
     str_val = re.sub(r'\s+', ' ', str_val)
-    return str_val.lower() if str_val else np.nan
+    return str_val
 
 def helper_group_columns_openpyxl(ws):
     """Group các cột bằng openpyxl (An toàn cho môi trường online)."""
@@ -83,7 +83,7 @@ def helper_group_columns_openpyxl(ws):
                 dim.outline_level = 0
                 dim.collapsed = False
         
-        ranges_to_group = [("B", "C"), ("G", "H"), ("K", "K"), ("N", "Q"), ("W", "AY")]  # Sử dụng AY như ban đầu
+        ranges_to_group = [("B", "C"), ("G", "H"), ("K", "K"), ("N", "Q"), ("W", "AY")]
         for start_col, end_col in ranges_to_group:
             start_idx = column_index_from_string(start_col)
             end_idx = column_index_from_string(end_col)
@@ -197,6 +197,8 @@ def tool1_transform_and_copy(source_buffer, source_sheet, dest_sheet, progress_b
 
         # Gán tên cột theo thứ tự trong TOOL1_COLUMN_MAPPING
         df_source.columns = source_cols_letters_list
+        logging.debug(f"Cột nguồn đọc được: {df_source.columns.tolist()}")
+        logging.debug(f"Dữ liệu mẫu (hàng đầu tiên): {df_source.iloc[0].to_dict()}")
         progress_bar.progress(20)
 
         # 2. Mở file mẫu
@@ -231,16 +233,19 @@ def tool1_transform_and_copy(source_buffer, source_sheet, dest_sheet, progress_b
         # 3. Ghi dữ liệu
         status_label.info("Đang sao chép dữ liệu...")
         total_rows_to_write = len(df_source)
+        total_cols = len(TOOL1_COLUMN_MAPPING)
         
-        for source_col, dest_col in TOOL1_COLUMN_MAPPING.items():
+        for i, (source_col, dest_col) in enumerate(TOOL1_COLUMN_MAPPING.items()):
             col_index_dest = column_index_from_string(dest_col)
             data_series = df_source[source_col]  # Lấy dữ liệu từ cột nguồn
+            logging.debug(f"Ánh xạ {source_col} -> {dest_col} (cột đích index: {col_index_dest})")
             for j, value in enumerate(data_series, start=TOOL1_START_ROW_DESTINATION):
-                cell_value = None if pd.isna(value) else value
+                cell_value = helper_normalize_value(value)
                 ws_dest.cell(row=j, column=col_index_dest, value=cell_value)
+                if j == TOOL1_START_ROW_DESTINATION:  # Log giá trị đầu tiên của mỗi cột
+                    logging.debug(f"Ghi giá trị đầu tiên vào {dest_col}{j}: {cell_value}")
+            progress_bar.progress(40 + int((i + 1) / total_cols * 40))
         
-        progress_bar.progress(80)
-
         # 4. Kẻ viền cho vùng dữ liệu thực tế (A → AX)
         status_label.info("Đang kẻ viền cho vùng dữ liệu mới...")
         thin_border = Border(
@@ -259,7 +264,11 @@ def tool1_transform_and_copy(source_buffer, source_sheet, dest_sheet, progress_b
                 cell.border = thin_border
         progress_bar.progress(95)
 
-        # 5. Lưu kết quả vào buffer
+        # 5. Nhóm cột (tạm giữ, có thể bỏ nếu không cần)
+        status_label.info("Đang nhóm cột...")
+        helper_group_columns_openpyxl(ws_dest)
+
+        # 6. Lưu kết quả vào buffer
         status_label.info("Đang lưu kết quả...")
         output_buffer = io.BytesIO()
         wb_dest.save(output_buffer)
