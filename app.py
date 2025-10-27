@@ -25,7 +25,7 @@ logging.basicConfig(
 # --- CẤU HÌNH CÔNG CỤ 1: SAO CHÉP & ÁNH XẠ ---
 TOOL1_COLUMN_MAPPING: Dict[str, str] = {
     'A': 'T', 'B': 'U', 'C': 'Y', 'D': 'C', 'E': 'H',
-    'F': 'I', 'G': 'X', 'I': 'K', 'N': 'AX'  # Đổi từ 'AY' sang 'AX'
+    'F': 'I', 'G': 'X', 'I': 'K', 'N': 'AY'  # Giữ nguyên AY như code ban đầu
 }
 TOOL1_START_ROW_DESTINATION: int = 7
 TOOL1_TEMPLATE_FILE_PATH: str = "templates/PL3-01-CV2071-QLĐĐ (Cap nhat).xlsx"
@@ -83,7 +83,7 @@ def helper_group_columns_openpyxl(ws):
                 dim.outline_level = 0
                 dim.collapsed = False
         
-        ranges_to_group = [("B", "C"), ("G", "H"), ("K", "K"), ("N", "Q"), ("W", "AX")]  # Đổi 'AY' thành 'AX'
+        ranges_to_group = [("B", "C"), ("G", "H"), ("K", "K"), ("N", "Q"), ("W", "AY")]  # Sử dụng AY như ban đầu
         for start_col, end_col in ranges_to_group:
             start_idx = column_index_from_string(start_col)
             end_idx = column_index_from_string(end_col)
@@ -213,16 +213,16 @@ def tool1_transform_and_copy(source_buffer, source_sheet, dest_sheet, progress_b
             return None
         ws_dest = wb_dest[dest_sheet]
 
-        # Kiểm tra và mở rộng số cột nếu cần (đến cột AX = 50)
-        max_required_col = max(column_index_from_string(col) for col in TOOL1_COLUMN_MAPPING.values())  # 50 cho AX
+        # Kiểm tra và mở rộng số cột nếu cần (đến cột AY = 51)
+        max_required_col = max(column_index_from_string(col) for col in TOOL1_COLUMN_MAPPING.values())  # 51 cho AY
         if ws_dest.max_column < max_required_col:
             status_label.info(f"Sheet đích chỉ có {ws_dest.max_column} cột, đang mở rộng đến {max_required_col} cột...")
             for col_idx in range(ws_dest.max_column + 1, max_required_col + 1):
                 col_letter = get_column_letter(col_idx)
                 ws_dest[f"{col_letter}1"] = ""  # Thêm ô trống để mở rộng cột
-            logging.info(f"Đã mở rộng sheet đích lên {ws_dest.max_column} cột")
+            logging.info(f"Đã mở rộng sheet đích. Số cột hiện tại: {ws_dest.max_column}")
             if ws_dest.max_column < max_required_col:
-                st.error(f"Lỗi: Không thể mở rộng sheet đích đến cột AX (cột {max_required_col}).")
+                st.error(f"Lỗi: Không thể mở rộng sheet đích đến cột AY (cột {max_required_col}). Vui lòng kiểm tra file mẫu.")
                 logging.error(f"Không thể mở rộng sheet đích đến cột {max_required_col}")
                 wb_dest.close()
                 return None
